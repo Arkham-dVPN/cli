@@ -60,6 +60,7 @@ func runInteractive(cmd *cobra.Command, args []string) {
 	menu := &survey.Select{
 		Message: promptStyle.Render("Choose an action:"),
 		Options: []string{
+			"Register as Warden",
 			"Start Gateway Node",
 			"Start Peer-Only Node",
 			"View Credits",
@@ -80,6 +81,8 @@ func runInteractive(cmd *cobra.Command, args []string) {
 
 		// 3. Handle the user's choice
 		switch choice {
+		case "Register as Warden":
+			handleRegistration()
 		case "Start Gateway Node":
 			startGatewayNode()
 		case "Start Peer-Only Node":
