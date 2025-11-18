@@ -835,6 +835,7 @@ type ProtocolConfig struct {
 	Authority         solanago.PublicKey `json:"authority"`
 	Treasury          solanago.PublicKey `json:"treasury"`
 	ArkhamTokenMint   solanago.PublicKey `json:"arkhamTokenMint"`
+	OracleAuthority   solanago.PublicKey `json:"oracleAuthority"`
 	BaseRatePerMb     uint64             `json:"baseRatePerMb"`
 	ProtocolFeeBps    uint16             `json:"protocolFeeBps"`
 	TierThresholds    [3]uint64          `json:"tierThresholds"`
@@ -859,6 +860,11 @@ func (obj ProtocolConfig) MarshalWithEncoder(encoder *binary.Encoder) (err error
 	err = encoder.Encode(obj.ArkhamTokenMint)
 	if err != nil {
 		return errors.NewField("ArkhamTokenMint", err)
+	}
+	// Serialize `OracleAuthority`:
+	err = encoder.Encode(obj.OracleAuthority)
+	if err != nil {
+		return errors.NewField("OracleAuthority", err)
 	}
 	// Serialize `BaseRatePerMb`:
 	err = encoder.Encode(obj.BaseRatePerMb)
@@ -923,6 +929,11 @@ func (obj *ProtocolConfig) UnmarshalWithDecoder(decoder *binary.Decoder) (err er
 	err = decoder.Decode(&obj.ArkhamTokenMint)
 	if err != nil {
 		return errors.NewField("ArkhamTokenMint", err)
+	}
+	// Deserialize `OracleAuthority`:
+	err = decoder.Decode(&obj.OracleAuthority)
+	if err != nil {
+		return errors.NewField("OracleAuthority", err)
 	}
 	// Deserialize `BaseRatePerMb`:
 	err = decoder.Decode(&obj.BaseRatePerMb)

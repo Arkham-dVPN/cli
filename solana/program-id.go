@@ -5,4 +5,4 @@ package arkham_protocol
 
 import solanago "github.com/gagliardetto/solana-go"
 
-var ProgramID = solanago.MustPublicKeyFromBase58("6Qj2WJcAmvQUh6tTYMT1yuDLL6eSpp8cFY9PzPLCeSgj")
+var ProgramID = solanago.MustPublicKeyFromBase58("B85X9aTrpWAdi1xhLvPmDPuYmfz5YdMd9X8qr7uU4H18")

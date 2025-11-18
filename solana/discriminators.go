@@ -35,6 +35,7 @@ var (
 	Instruction_ClaimArkhamTokens         = [8]byte{180, 14, 137, 225, 247, 246, 242, 200}
 	Instruction_ClaimEarnings             = [8]byte{49, 99, 161, 170, 22, 233, 54, 140}
 	Instruction_ClaimUnstake              = [8]byte{172, 113, 117, 178, 223, 245, 247, 118}
+	Instruction_CloseProtocolConfig       = [8]byte{203, 147, 4, 67, 17, 28, 203, 219}
 	Instruction_DepositEscrow             = [8]byte{226, 112, 158, 176, 178, 118, 153, 128}
 	Instruction_DistributeSubsidies       = [8]byte{38, 141, 106, 248, 234, 99, 180, 91}
 	Instruction_EndConnection             = [8]byte{145, 116, 162, 199, 86, 180, 63, 42}
@@ -42,6 +43,7 @@ var (
 	Instruction_InitializeArkhamMint      = [8]byte{199, 33, 247, 30, 147, 49, 100, 72}
 	Instruction_InitializeProtocolConfig  = [8]byte{28, 50, 43, 233, 244, 98, 123, 118}
 	Instruction_InitializeWarden          = [8]byte{208, 228, 42, 148, 121, 54, 243, 65}
+	Instruction_MigrateProtocolConfig     = [8]byte{240, 133, 241, 218, 118, 253, 139, 28}
 	Instruction_StartConnection           = [8]byte{27, 34, 208, 176, 138, 230, 238, 74}
 	Instruction_SubmitBandwidthProof      = [8]byte{98, 96, 38, 149, 163, 54, 248, 15}
 	Instruction_UnstakeWarden             = [8]byte{224, 104, 75, 109, 242, 42, 150, 156}

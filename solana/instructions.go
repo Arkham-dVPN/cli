@@ -145,6 +145,38 @@ func NewClaimUnstakeInstruction(
 	), nil
 }
 
+// Builds a "close_protocol_config" instruction.
+func NewCloseProtocolConfigInstruction(
+	protocolConfigAccount solanago.PublicKey,
+	authorityAccount solanago.PublicKey,
+	receiverAccount solanago.PublicKey,
+	systemProgramAccount solanago.PublicKey,
+) (solanago.Instruction, error) {
+	accounts__ := solanago.AccountMetaSlice{}
+
+	// Add the accounts to the instruction.
+	{
+		// Account 0 "protocol_config": Writable, Non-signer, Required
+		// Protocol config account to close - using AccountInfo to avoid deserialization
+		accounts__.Append(solanago.NewAccountMeta(protocolConfigAccount, true, false))
+		// Account 1 "authority": Writable, Signer, Required
+		// The authority that should match the one stored in the account
+		accounts__.Append(solanago.NewAccountMeta(authorityAccount, true, true))
+		// Account 2 "receiver": Writable, Non-signer, Required
+		// Receiver of the rent (can be the authority or another account)
+		accounts__.Append(solanago.NewAccountMeta(receiverAccount, true, false))
+		// Account 3 "system_program": Read-only, Non-signer, Required
+		accounts__.Append(solanago.NewAccountMeta(systemProgramAccount, false, false))
+	}
+
+	// Create the instruction.
+	return solanago.NewInstruction(
+		ProgramID,
+		accounts__,
+		nil,
+	), nil
+}
+
 // Builds a "deposit_escrow" instruction.
 func NewDepositEscrowInstruction(
 	// Params:
@@ -350,6 +382,7 @@ func NewInitializeProtocolConfigInstruction(
 	tierMultipliersParam [3]uint16,
 	tokensPer5gbParam uint64,
 	geoPremiumsParam []GeoPremium,
+	oracleAuthorityParam solanago.PublicKey,
 
 	// Accounts:
 	protocolConfigAccount solanago.PublicKey,
@@ -396,6 +429,11 @@ func NewInitializeProtocolConfigInstruction(
 		if err != nil {
 			return nil, errors.NewField("geoPremiumsParam", err)
 		}
+		// Serialize `oracleAuthorityParam`:
+		err = enc__.Encode(oracleAuthorityParam)
+		if err != nil {
+			return nil, errors.NewField("oracleAuthorityParam", err)
+		}
 	}
 	accounts__ := solanago.AccountMetaSlice{}
 
@@ -427,19 +465,21 @@ func NewInitializeWardenInstruction(
 	peerIdParam string,
 	regionCodeParam uint8,
 	ipHashParam [32]uint8,
+	priceParam uint64,
+	timestampParam int64,
+	signatureParam [64]uint8,
 
 	// Accounts:
 	wardenAccount solanago.PublicKey,
 	authorityAccount solanago.PublicKey,
 	protocolConfigAccount solanago.PublicKey,
+	instructionsSysvarAccount solanago.PublicKey,
 	stakeFromAccountAccount solanago.PublicKey,
 	solVaultAccount solanago.PublicKey,
 	usdcVaultAccount solanago.PublicKey,
 	usdtVaultAccount solanago.PublicKey,
 	usdcMintAccount solanago.PublicKey,
 	usdtMintAccount solanago.PublicKey,
-	solUsdPriceFeedAccount solanago.PublicKey,
-	usdtUsdPriceFeedAccount solanago.PublicKey,
 	systemProgramAccount solanago.PublicKey,
 	tokenProgramAccount solanago.PublicKey,
 	associatedTokenProgramAccount solanago.PublicKey,
@@ -478,6 +518,21 @@ func NewInitializeWardenInstruction(
 		if err != nil {
 			return nil, errors.NewField("ipHashParam", err)
 		}
+		// Serialize `priceParam`:
+		err = enc__.Encode(priceParam)
+		if err != nil {
+			return nil, errors.NewField("priceParam", err)
+		}
+		// Serialize `timestampParam`:
+		err = enc__.Encode(timestampParam)
+		if err != nil {
+			return nil, errors.NewField("timestampParam", err)
+		}
+		// Serialize `signatureParam`:
+		err = enc__.Encode(signatureParam)
+		if err != nil {
+			return nil, errors.NewField("signatureParam", err)
+		}
 	}
 	accounts__ := solanago.AccountMetaSlice{}
 
@@ -489,27 +544,25 @@ func NewInitializeWardenInstruction(
 		accounts__.Append(solanago.NewAccountMeta(authorityAccount, true, true))
 		// Account 2 "protocol_config": Read-only, Non-signer, Required
 		accounts__.Append(solanago.NewAccountMeta(protocolConfigAccount, false, false))
-		// Account 3 "stake_from_account": Writable, Non-signer, Required
+		// Account 3 "instructions_sysvar": Read-only, Non-signer, Required, Address: Sysvar1nstructions1111111111111111111111111
+		accounts__.Append(solanago.NewAccountMeta(instructionsSysvarAccount, false, false))
+		// Account 4 "stake_from_account": Writable, Non-signer, Required
 		accounts__.Append(solanago.NewAccountMeta(stakeFromAccountAccount, true, false))
-		// Account 4 "sol_vault": Writable, Non-signer, Required
+		// Account 5 "sol_vault": Writable, Non-signer, Required
 		accounts__.Append(solanago.NewAccountMeta(solVaultAccount, true, false))
-		// Account 5 "usdc_vault": Writable, Non-signer, Required
+		// Account 6 "usdc_vault": Writable, Non-signer, Required
 		accounts__.Append(solanago.NewAccountMeta(usdcVaultAccount, true, false))
-		// Account 6 "usdt_vault": Writable, Non-signer, Required
+		// Account 7 "usdt_vault": Writable, Non-signer, Required
 		accounts__.Append(solanago.NewAccountMeta(usdtVaultAccount, true, false))
-		// Account 7 "usdc_mint": Read-only, Non-signer, Required
+		// Account 8 "usdc_mint": Read-only, Non-signer, Required
 		accounts__.Append(solanago.NewAccountMeta(usdcMintAccount, false, false))
-		// Account 8 "usdt_mint": Read-only, Non-signer, Required
+		// Account 9 "usdt_mint": Read-only, Non-signer, Required
 		accounts__.Append(solanago.NewAccountMeta(usdtMintAccount, false, false))
-		// Account 9 "sol_usd_price_feed": Read-only, Non-signer, Required
-		accounts__.Append(solanago.NewAccountMeta(solUsdPriceFeedAccount, false, false))
-		// Account 10 "usdt_usd_price_feed": Read-only, Non-signer, Required
-		accounts__.Append(solanago.NewAccountMeta(usdtUsdPriceFeedAccount, false, false))
-		// Account 11 "system_program": Read-only, Non-signer, Required
+		// Account 10 "system_program": Read-only, Non-signer, Required
 		accounts__.Append(solanago.NewAccountMeta(systemProgramAccount, false, false))
-		// Account 12 "token_program": Read-only, Non-signer, Required, Address: TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA
+		// Account 11 "token_program": Read-only, Non-signer, Required, Address: TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA
 		accounts__.Append(solanago.NewAccountMeta(tokenProgramAccount, false, false))
-		// Account 13 "associated_token_program": Read-only, Non-signer, Required, Address: ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL
+		// Account 12 "associated_token_program": Read-only, Non-signer, Required, Address: ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL
 		accounts__.Append(solanago.NewAccountMeta(associatedTokenProgramAccount, false, false))
 	}
 
@@ -518,6 +571,33 @@ func NewInitializeWardenInstruction(
 		ProgramID,
 		accounts__,
 		buf__.Bytes(),
+	), nil
+}
+
+// Builds a "migrate_protocol_config" instruction.
+func NewMigrateProtocolConfigInstruction(
+	protocolConfigAccount solanago.PublicKey,
+	authorityAccount solanago.PublicKey,
+	newOracleAuthorityAccount solanago.PublicKey,
+) (solanago.Instruction, error) {
+	accounts__ := solanago.AccountMetaSlice{}
+
+	// Add the accounts to the instruction.
+	{
+		// Account 0 "protocol_config": Writable, Non-signer, Required
+		accounts__.Append(solanago.NewAccountMeta(protocolConfigAccount, true, false))
+		// Account 1 "authority": Writable, Signer, Required
+		accounts__.Append(solanago.NewAccountMeta(authorityAccount, true, true))
+		// Account 2 "new_oracle_authority": Read-only, Non-signer, Required
+		// New oracle authority to set
+		accounts__.Append(solanago.NewAccountMeta(newOracleAuthorityAccount, false, false))
+	}
+
+	// Create the instruction.
+	return solanago.NewInstruction(
+		ProgramID,
+		accounts__,
+		nil,
 	), nil
 }
 
@@ -717,6 +797,7 @@ func NewUpdateProtocolConfigInstruction(
 	newTokensPer5gbParam *uint64,
 	newGeoPremiumsParam *[]GeoPremium,
 	newReputationUpdaterParam *solanago.PublicKey,
+	newOracleAuthorityParam *solanago.PublicKey,
 
 	// Accounts:
 	protocolConfigAccount solanago.PublicKey,
@@ -854,6 +935,24 @@ func NewUpdateProtocolConfigInstruction(
 				err = enc__.Encode(newReputationUpdaterParam)
 				if err != nil {
 					return nil, errors.NewField("newReputationUpdaterParam", err)
+				}
+			}
+		}
+		// Serialize `newOracleAuthorityParam` (optional):
+		{
+			if newOracleAuthorityParam == nil {
+				err = enc__.WriteOption(false)
+				if err != nil {
+					return nil, errors.NewOption("newOracleAuthorityParam", fmt.Errorf("error while encoding optionality: %w", err))
+				}
+			} else {
+				err = enc__.WriteOption(true)
+				if err != nil {
+					return nil, errors.NewOption("newOracleAuthorityParam", fmt.Errorf("error while encoding optionality: %w", err))
+				}
+				err = enc__.Encode(newOracleAuthorityParam)
+				if err != nil {
+					return nil, errors.NewField("newOracleAuthorityParam", err)
 				}
 			}
 		}
