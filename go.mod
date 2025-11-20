@@ -15,6 +15,8 @@ require (
 	golang.zx2c4.com/wireguard/wgctrl v0.0.0-20230429144221-925a1e7659e6
 )
 
+
+
 require (
 	arkham-cli/solana v0.0.0-00010101000000-000000000000 // indirect
 	filippo.io/edwards25519 v1.0.0-rc.1 // indirect

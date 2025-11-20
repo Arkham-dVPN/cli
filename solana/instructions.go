@@ -292,6 +292,15 @@ func NewEndConnectionInstruction(
 	wardenAccount solanago.PublicKey,
 	seekerAuthorityAccount solanago.PublicKey,
 ) (solanago.Instruction, error) {
+	buf__ := new(bytes.Buffer)
+	enc__ := binary.NewBorshEncoder(buf__)
+
+	// Encode the instruction discriminator.
+	err := enc__.WriteBytes(Instruction_EndConnection[:], false)
+	if err != nil {
+		return nil, fmt.Errorf("failed to write instruction discriminator: %w", err)
+	}
+
 	accounts__ := solanago.AccountMetaSlice{}
 
 	// Add the accounts to the instruction.
@@ -310,7 +319,7 @@ func NewEndConnectionInstruction(
 	return solanago.NewInstruction(
 		ProgramID,
 		accounts__,
-		nil,
+		buf__.Bytes(),
 	), nil
 }
 

@@ -126,7 +126,10 @@ func runInteractive(signer solana.PrivateKey, profileName string) {
 		if isRegistered {
 			menuOptions = []string{
 				"View Warden Dashboard",
+				"View My Connections",
 				"Test Submit Bandwidth Proof",
+				"Claim Earnings",
+				"Claim ARKHAM Tokens",
 				"Wallet Management",
 				"Switch Profile",
 			}
@@ -140,9 +143,11 @@ func runInteractive(signer solana.PrivateKey, profileName string) {
 	} else if profileName == "seeker" {
 		menuOptions = []string{
 			"View Seeker Dashboard",
+			"View My Connections",
 			"Deposit Escrow",
 			"Start Connection",
 			"Generate Signature for Proof",
+			"End Connection",
 			"Wallet Management",
 			"Switch Profile",
 		}
@@ -166,9 +171,15 @@ func runInteractive(signer solana.PrivateKey, profileName string) {
 	case "Register as Warden":
 		handleRegistration(signer)
 	case "View Warden Dashboard":
-		fmt.Println(titleStyle.Render("\n📊 Warden Dashboard (Coming Soon)"))
+		handleViewWardenDashboard(signer)
+	case "View My Connections":
+		handleViewMyConnections(signer, profileName)
 	case "Test Submit Bandwidth Proof":
 		handleBandwidthProof(signer)
+	case "Claim Earnings":
+		handleClaimEarnings(signer)
+	case "Claim ARKHAM Tokens":
+		handleClaimArkhamTokens(signer)
 	// Seeker actions
 	case "View Seeker Dashboard":
 		fmt.Println(titleStyle.Render("\n📊 Seeker Dashboard (Coming Soon)"))
@@ -178,6 +189,8 @@ func runInteractive(signer solana.PrivateKey, profileName string) {
 		handleStartConnection(signer)
 	case "Generate Signature for Proof":
 		handleGenerateSignature(signer)
+	case "End Connection":
+		handleEndConnection(signer)
 	// Common actions
 	case "Wallet Management":
 		handleWalletManagement(signer)
@@ -186,6 +199,73 @@ func runInteractive(signer solana.PrivateKey, profileName string) {
 	}
 	fmt.Println()
 }
+
+func handleViewWardenDashboard(signer solana.PrivateKey) {
+	client, err := arkham_protocol.NewClient(devnetRpcEndpoint, signer)
+	if err != nil {
+		fmt.Println(warningStyle.Render(fmt.Sprintf("Failed to create Solana client: %v", err)))
+		return
+	}
+
+	fmt.Println(promptStyle.Render("\nFetching Warden dashboard data..."))
+
+	wardenAccount, err := client.FetchWardenAccount()
+	if err != nil {
+		fmt.Println(warningStyle.Render(fmt.Sprintf("\n❌ Could not fetch Warden data: %v", err)))
+		return
+	}
+
+
+pendingClaimsSol := float64(wardenAccount.PendingClaims) / float64(solana.LAMPORTS_PER_SOL)
+totalEarningsSol := float64(wardenAccount.TotalEarnings) / float64(solana.LAMPORTS_PER_SOL)
+	// Assuming ARKHAM token has 9 decimals, as per the vision doc.
+	arkhamTokensEarned := float64(wardenAccount.ArkhamTokensEarned) / 1_000_000_000.0
+
+	fmt.Println(titleStyle.Render("\n📊 Warden Dashboard"))
+	fmt.Println(infoStyle.Render("----------------------------------------"))
+	fmt.Printf("  %s %s\n", promptStyle.Render("Total Bandwidth Served:"), titleStyle.Render(fmt.Sprintf("%d MB", wardenAccount.TotalBandwidthServed)))
+	fmt.Println(infoStyle.Render("---"))
+	fmt.Printf("  %s %s\n", promptStyle.Render("Pending Claims:"), titleStyle.Render(fmt.Sprintf("%.9f SOL", pendingClaimsSol)))
+	fmt.Printf("  %s %s\n", promptStyle.Render("Total Lifetime Earnings:"), titleStyle.Render(fmt.Sprintf("%.9f SOL", totalEarningsSol)))
+	fmt.Println(infoStyle.Render("---"))
+	fmt.Printf("  %s %s\n", promptStyle.Render("Claimable ARKHAM Tokens:"), titleStyle.Render(fmt.Sprintf("%.9f ARKHAM", arkhamTokensEarned)))
+	fmt.Println(infoStyle.Render("----------------------------------------"))
+}
+
+func handleViewMyConnections(signer solana.PrivateKey, profileName string) {
+	client, err := arkham_protocol.NewClient(devnetRpcEndpoint, signer)
+	if err != nil {
+		fmt.Println(warningStyle.Render(fmt.Sprintf("Failed to create Solana client: %v", err)))
+		return
+	}
+
+	fmt.Println(promptStyle.Render("\nFetching your connection accounts..."))
+
+	connections, err := client.FetchMyConnections(profileName)
+	if err != nil {
+		fmt.Println(warningStyle.Render(fmt.Sprintf("\n❌ Could not fetch connections: %v", err)))
+		return
+	}
+
+	if len(connections) == 0 {
+		fmt.Println(infoStyle.Render("No connection accounts found for your profile."))
+		return
+	}
+
+	fmt.Println(titleStyle.Render(fmt.Sprintf("\nFound %d Connection Account(s) for %s", len(connections), profileName)))
+	for _, conn := range connections {
+		fmt.Println(infoStyle.Render("----------------------------------------"))
+		fmt.Printf("  %s %s\n", promptStyle.Render("Connection PDA:"), conn.PublicKey.String())
+		fmt.Printf("  %s %s\n", promptStyle.Render("Seeker PDA:"), conn.Account.Seeker.String())
+		fmt.Printf("  %s %s\n", promptStyle.Render("Warden PDA:"), conn.Account.Warden.String())
+		fmt.Printf("  %s %d MB\n", promptStyle.Render("Bandwidth Consumed:"), conn.Account.BandwidthConsumed)
+		fmt.Printf("  %s %.9f SOL\n", promptStyle.Render("Amount Escrowed:"), float64(conn.Account.AmountEscrowed)/float64(solana.LAMPORTS_PER_SOL))
+		fmt.Printf("  %s %.9f SOL\n", promptStyle.Render("Amount Paid:"), float64(conn.Account.AmountPaid)/float64(solana.LAMPORTS_PER_SOL))
+		fmt.Printf("  %s %s\n", promptStyle.Render("Started At:"), time.Unix(conn.Account.StartedAt, 0).Format(time.RFC1123))
+	}
+	fmt.Println(infoStyle.Render("----------------------------------------"))
+}
+
 
 func handleGenerateSignature(signer solana.PrivateKey) {
 	client, err := arkham_protocol.NewClient(devnetRpcEndpoint, signer)
@@ -277,6 +357,48 @@ func handleBandwidthProof(signer solana.PrivateKey) {
 	fmt.Printf("   Transaction Signature: %s\n", sig.String())
 }
 
+func handleClaimEarnings(signer solana.PrivateKey) {
+	client, err := arkham_protocol.NewClient(devnetRpcEndpoint, signer)
+	if err != nil {
+		fmt.Println(warningStyle.Render(fmt.Sprintf("Failed to create Solana client: %v", err)))
+		return
+	}
+
+	fmt.Println(promptStyle.Render("\nClaiming accumulated earnings..."))
+	// For now, private claims are not implemented in the CLI.
+	usePrivate := false
+
+	sig, err := client.ClaimEarnings(usePrivate)
+	if err != nil {
+		fmt.Println(warningStyle.Render(fmt.Sprintf("\n❌ Failed to claim earnings: %v", err)))
+		return
+	}
+
+	fmt.Println(titleStyle.Render("\n✅ Earnings Claimed Successfully!"))
+	fmt.Printf("   Check your wallet for the incoming SOL.\n")
+	fmt.Printf("   Transaction Signature: %s\n", sig.String())
+}
+
+func handleClaimArkhamTokens(signer solana.PrivateKey) {
+	client, err := arkham_protocol.NewClient(devnetRpcEndpoint, signer)
+	if err != nil {
+		fmt.Println(warningStyle.Render(fmt.Sprintf("Failed to create Solana client: %v", err)))
+		return
+	}
+
+	fmt.Println(promptStyle.Render("\nClaiming accumulated ARKHAM tokens..."))
+
+	sig, err := client.ClaimArkhamTokens()
+	if err != nil {
+		fmt.Println(warningStyle.Render(fmt.Sprintf("\n❌ Failed to claim ARKHAM tokens: %v", err)))
+		return
+	}
+
+	fmt.Println(titleStyle.Render("\n✅ ARKHAM Tokens Claimed Successfully!"))
+	fmt.Printf("   Check your wallet for the new tokens.\n")
+	fmt.Printf("   Transaction Signature: %s\n", sig.String())
+}
+
 func handleCreateSeekerProfile(db *storage.WalletStorage) {
 	fmt.Println(promptStyle.Render("\nCreating new Seeker wallet..."))
 	newWallet := solana.NewWallet()
@@ -337,10 +459,46 @@ func handleStartConnection(signer solana.PrivateKey) {
 		return
 	}
 
-	// For now, we use a default estimated usage.
-	estimatedMb := uint64(100)
+	// --- Smart Suggestion Logic ---
+	fmt.Println(promptStyle.Render("Calculating suggestion for estimated MB..."))
+	var suggestedMb uint64 = 100 // Default suggestion
 
-	fmt.Println(promptStyle.Render(fmt.Sprintf("\nStarting connection with Warden %s...", wardenPubkeyStr)))
+	seekerAccount, err := client.FetchSeekerAccount()
+	if err != nil {
+		fmt.Println(warningStyle.Render(fmt.Sprintf("\nWarning: Could not fetch seeker account to calculate suggestion: %v", err)))
+	} else {
+		protocolConfig, err := client.FetchProtocolConfig()
+		if err != nil {
+			fmt.Println(warningStyle.Render(fmt.Sprintf("\nWarning: Could not fetch protocol config to calculate suggestion: %v", err)))
+		} else {
+			if protocolConfig.BaseRatePerMb > 0 && seekerAccount.EscrowBalance > 0 {
+				// Use 90% of balance for calculation to leave a buffer for fees and rate fluctuations.
+				affordableBalance := (seekerAccount.EscrowBalance * 9) / 10
+				// The contract adds a 10% buffer, so we account for that in our suggestion.
+				// rate_per_mb * 1.1
+				effectiveRate := (protocolConfig.BaseRatePerMb * 11) / 10
+				if effectiveRate > 0 {
+					suggestedMb = affordableBalance / effectiveRate
+				}
+			}
+		}
+	}
+	// --- End Smart Suggestion Logic ---
+
+	estimatedMbStr := ""
+	mbPrompt := &survey.Input{
+		Message: "Enter estimated MB for the connection:",
+		Default: strconv.FormatUint(suggestedMb, 10),
+	}
+	survey.AskOne(mbPrompt, &estimatedMbStr)
+	estimatedMb, _ := strconv.ParseUint(estimatedMbStr, 10, 64)
+
+	if estimatedMb == 0 {
+		fmt.Println(warningStyle.Render("Estimated MB cannot be zero."))
+		return
+	}
+
+	fmt.Println(promptStyle.Render(fmt.Sprintf("\nStarting connection with Warden %s for %d MB...", wardenPubkeyStr, estimatedMb)))
 	sig, err := client.StartConnection(wardenPubkey, estimatedMb)
 	if err != nil {
 		fmt.Println(warningStyle.Render(fmt.Sprintf("\n❌ Failed to start connection: %v", err)))
@@ -351,6 +509,37 @@ func handleStartConnection(signer solana.PrivateKey) {
 	fmt.Printf("   This created the on-chain Connection account.\n")
 	fmt.Printf("   Transaction Signature: %s\n", sig.String())
 }
+
+
+func handleEndConnection(signer solana.PrivateKey) {
+	client, err := arkham_protocol.NewClient(devnetRpcEndpoint, signer)
+	if err != nil {
+		fmt.Println(warningStyle.Render(fmt.Sprintf("Failed to create Solana client: %v", err)))
+		return
+	}
+
+	wardenPubkeyStr := ""
+	wardenPrompt := &survey.Input{Message: "Enter the Warden's public key of the connection to end:"}
+	survey.AskOne(wardenPrompt, &wardenPubkeyStr, survey.WithValidator(survey.Required))
+
+	wardenPubkey, err := solana.PublicKeyFromBase58(wardenPubkeyStr)
+	if err != nil {
+		fmt.Println(warningStyle.Render("Invalid Warden public key."))
+		return
+	}
+
+	fmt.Println(promptStyle.Render(fmt.Sprintf("\nEnding connection with Warden %s...", wardenPubkeyStr)))
+	sig, err := client.EndConnection(wardenPubkey)
+	if err != nil {
+		fmt.Println(warningStyle.Render(fmt.Sprintf("\n❌ Failed to end connection: %v", err)))
+		return
+	}
+
+	fmt.Println(titleStyle.Render("\n✅ Connection Ended Successfully!"))
+	fmt.Printf("   This closed the on-chain Connection account and refunded unused escrow.\n")
+	fmt.Printf("   Transaction Signature: %s\n", sig.String())
+}
+
 
 func runInit(db *storage.WalletStorage) {
 	fmt.Println(titleStyle.Render("🚀 Welcome to Arkham! Let's get you set up."))
