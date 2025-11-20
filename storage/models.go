@@ -1,9 +1,9 @@
 package storage
 
-// Wallet represents the wallet data stored in the JSON file.
-// We use a byte slice for the private key as it's the raw format
-// for database storage and cryptographic operations.
-type Wallet struct {
-	ID         int    // A fixed ID (e.g., 1) to ensure only one wallet is stored.
-	PrivateKey []byte // Stored as bytes (decoded from base64 string in JSON).
+import "github.com/gagliardetto/solana-go"
+
+// WalletData holds all the wallets managed by the CLI.
+// The key of the map is the wallet's name (e.g., "warden", "seeker").
+type WalletData struct {
+	Wallets map[string]solana.PrivateKey `json:"wallets"`
 }

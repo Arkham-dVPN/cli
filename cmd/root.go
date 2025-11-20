@@ -3,12 +3,14 @@ package cmd
 import (
 	"arkham-cli/storage"
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
+	"time"
 
 	arkham_protocol "arkham-cli/solana"
 
@@ -45,41 +47,104 @@ func run(cmd *cobra.Command, args []string) {
 	myFigure := figure.NewFigure("ARKHAM", "larry3d", true)
 	fmt.Println(titleStyle.Render(myFigure.String()))
 
-	if !isInitialized() {
-		runInit()
+	// The main application loop is now wrapped in profile selection.
+	for {
+		signer, profileName, err := runProfileSelection()
+		if err != nil {
+			// This error is returned when the user chooses to exit.
+			fmt.Println("Exiting Arkham CLI.")
+			os.Exit(0)
+		}
+		runInteractive(signer, profileName)
 	}
-	runInteractive()
 }
 
-func runInteractive() {
-	// Create a client to interact with the blockchain
-	signer := mustGetWallet()
+// runProfileSelection handles the UI for choosing or creating a wallet profile.
+func runProfileSelection() (solana.PrivateKey, string, error) {
+	db, err := storage.NewWalletStorage()
+	if err != nil {
+		panic(fmt.Sprintf("failed to connect to wallet storage: %v", err))
+	}
+
+	// If no warden wallet exists, run the first-time initialization.
+	if !isInitialized(db) {
+		runInit(db)
+	}
+
+	for {
+		profiles, err := db.GetAllWalletNames()
+		if err != nil {
+			panic(fmt.Sprintf("failed to get wallet profiles: %v", err))
+		}
+
+		options := append(profiles, "Create New Seeker Profile", "Exit")
+
+		selection := ""
+		prompt := &survey.Select{
+			Message: promptStyle.Render("Choose a profile to continue:"),
+			Options: options,
+		}
+		survey.AskOne(prompt, &selection)
+
+		switch selection {
+		case "Create New Seeker Profile":
+			handleCreateSeekerProfile(db)
+			// Loop again to show the new profile in the list.
+			continue
+		case "Exit":
+			return nil, "", fmt.Errorf("user exited")
+		default: // A profile was selected
+			signer, err := db.GetWallet(selection)
+			if err != nil {
+				panic(fmt.Sprintf("failed to get wallet for profile '%s': %v", selection, err))
+			}
+			return signer, selection, nil
+		}
+	}
+}
+
+func runInteractive(signer solana.PrivateKey, profileName string) {
 	client, err := arkham_protocol.NewClient(devnetRpcEndpoint, signer)
 	if err != nil {
 		fmt.Println(warningStyle.Render(fmt.Sprintf("Failed to create Solana client: %v", err)))
-		os.Exit(1)
+		return
 	}
 
-	// Check if the user is already registered as a warden
-	fmt.Println(promptStyle.Render("Checking registration status..."))
-	isRegistered, err := client.IsWardenRegistered()
-	if err != nil {
-		fmt.Println(warningStyle.Render(fmt.Sprintf("Could not check warden status: %v", err)))
-		os.Exit(1)
-	}
+	fmt.Printf("\n---\n")
+	fmt.Println(titleStyle.Render(fmt.Sprintf("Operating with profile: %s", profileName)))
+	fmt.Println(promptStyle.Render(fmt.Sprintf("Address: %s", signer.PublicKey())))
+	fmt.Printf("---\n\n")
 
 	var menuOptions []string
-	if isRegistered {
-		menuOptions = []string{
-			"View Warden Dashboard",
-			"Wallet Management",
-			"Exit",
+	if profileName == "warden" {
+		fmt.Println(promptStyle.Render("Checking registration status..."))
+		isRegistered, err := client.IsWardenRegistered()
+		if err != nil {
+			fmt.Println(warningStyle.Render(fmt.Sprintf("Could not check warden status: %v", err)))
+			return
 		}
-	} else {
+		if isRegistered {
+			menuOptions = []string{
+				"View Warden Dashboard",
+				"Test Submit Bandwidth Proof",
+				"Wallet Management",
+				"Switch Profile",
+			}
+		} else {
+			menuOptions = []string{
+				"Register as Warden",
+				"Wallet Management",
+				"Switch Profile",
+			}
+		}
+	} else if profileName == "seeker" {
 		menuOptions = []string{
-			"Register as Warden",
+			"View Seeker Dashboard",
+			"Deposit Escrow",
+			"Start Connection",
+			"Generate Signature for Proof",
 			"Wallet Management",
-			"Exit",
+			"Switch Profile",
 		}
 	}
 
@@ -89,130 +154,264 @@ func runInteractive() {
 		Help:    "Use the arrow keys to navigate, and press Enter to select.",
 	}
 
-	for {
-		var choice string
-		err := survey.AskOne(menu, &choice)
-		if err != nil {
-			fmt.Println(warningStyle.Render(err.Error()))
-			return
-		}
-
-		switch choice {
-		case "Register as Warden":
-			handleRegistration()
-			// After successful registration, we should update the state
-			// For simplicity, we'll just inform the user to restart.
-			fmt.Println(titleStyle.Render("\nPlease restart the CLI to see the Warden Dashboard."))
-			os.Exit(0)
-		case "View Warden Dashboard":
-			// TODO: Implement the warden dashboard
-			fmt.Println(titleStyle.Render("\n📊 Warden Dashboard (Coming Soon)"))
-			fmt.Println(promptStyle.Render("This will show your tier, reputation, earnings, and other stats."))
-		case "Wallet Management":
-			handleWalletManagement()
-		case "Exit":
-			fmt.Println("Exiting Arkham CLI.")
-			os.Exit(0)
-		}
-		fmt.Println()
-	}
-}
-
-func runInit() {
-	fmt.Println(titleStyle.Render("🚀 Welcome to Arkham! Let's get you set up."))
-	db, err := storage.Connect()
-	if err != nil {
-		fmt.Println(warningStyle.Render(fmt.Sprintf("❌ Failed to connect to database: %v", err)))
-		os.Exit(1)
-	}
-	defer db.Close()
-
-	fmt.Println(promptStyle.Render("   Creating new Solana wallet..."))
-	newWallet := solana.NewWallet()
-
-	err = db.SaveWallet(newWallet.PrivateKey)
-	if err != nil {
-		fmt.Println(warningStyle.Render(fmt.Sprintf("❌ Failed to save new wallet: %v", err)))
-		os.Exit(1)
-	}
-
-	fmt.Println(titleStyle.Render("\n✅ Initialization Complete!"))
-	fmt.Println(promptStyle.Render("   A new wallet has been created and stored securely in the local database."))
-	fmt.Println(promptStyle.Render("   Your wallet address:"), newWallet.PublicKey().String())
-	fmt.Println(promptStyle.Render("\nPress Enter to continue to the main menu..."))
-	fmt.Scanln()
-}
-
-func handleWalletManagement() {
-	fmt.Println()
-	menu := &survey.Select{
-		Message: promptStyle.Render("Wallet Management:"),
-		Options: []string{
-			"View Address",
-			"View Balance",
-			"View Transaction History",
-			"Send SOL",
-			"Export Wallet (UNSAFE)",
-			"Back to Main Menu",
-		},
-	}
 	var choice string
-	err := survey.AskOne(menu, &choice)
+	err = survey.AskOne(menu, &choice)
 	if err != nil {
 		fmt.Println(warningStyle.Render(err.Error()))
 		return
 	}
 
 	switch choice {
-	case "View Address":
-		viewAddress()
-	case "View Balance":
-		viewBalance()
-	case "View Transaction History":
-		viewTxHistory()
-	case "Send SOL":
-		sendSol()
-	case "Export Wallet (UNSAFE)":
-		exportWallet()
-	case "Back to Main Menu":
-		return
+	// Warden actions
+	case "Register as Warden":
+		handleRegistration(signer)
+	case "View Warden Dashboard":
+		fmt.Println(titleStyle.Render("\n📊 Warden Dashboard (Coming Soon)"))
+	case "Test Submit Bandwidth Proof":
+		handleBandwidthProof(signer)
+	// Seeker actions
+	case "View Seeker Dashboard":
+		fmt.Println(titleStyle.Render("\n📊 Seeker Dashboard (Coming Soon)"))
+	case "Deposit Escrow":
+		handleDepositEscrow(signer)
+	case "Start Connection":
+		handleStartConnection(signer)
+	case "Generate Signature for Proof":
+		handleGenerateSignature(signer)
+	// Common actions
+	case "Wallet Management":
+		handleWalletManagement(signer)
+	case "Switch Profile":
+		return // Exit this interactive loop to go back to profile selection
 	}
+	fmt.Println()
 }
 
-func viewAddress() {
-	privateKey := mustGetWallet()
-	fmt.Println(titleStyle.Render("\n🔑 Your Arkham Wallet Address:"))
-	fmt.Println(privateKey.PublicKey().String())
-}
-
-func viewBalance() {
-	signer := mustGetWallet()
+func handleGenerateSignature(signer solana.PrivateKey) {
 	client, err := arkham_protocol.NewClient(devnetRpcEndpoint, signer)
 	if err != nil {
 		fmt.Println(warningStyle.Render(fmt.Sprintf("Failed to create Solana client: %v", err)))
 		return
 	}
 
+	wardenPubkeyStr := ""
+	wardenPrompt := &survey.Input{Message: "Enter the Warden's public key for the connection:"}
+	survey.AskOne(wardenPrompt, &wardenPubkeyStr, survey.WithValidator(survey.Required))
+
+	wardenPubkey, err := solana.PublicKeyFromBase58(wardenPubkeyStr)
+	if err != nil {
+		fmt.Println(warningStyle.Render("Invalid Warden public key."))
+		return
+	}
+
+	mbConsumedStr := "10"
+	mbPrompt := &survey.Input{Message: "Enter MB consumed:", Default: "10"}
+	survey.AskOne(mbPrompt, &mbConsumedStr)
+	mbConsumed, _ := strconv.ParseUint(mbConsumedStr, 10, 64)
+
+	// The timestamp is critical and must be shared with the warden.
+	timestamp := time.Now().Unix()
+
+	fmt.Println(promptStyle.Render("\nGenerating Seeker signature..."))
+	signature, err := client.GenerateBandwidthProofSignature(wardenPubkey, mbConsumed, timestamp)
+	if err != nil {
+		fmt.Println(warningStyle.Render(fmt.Sprintf("\n❌ Failed to generate signature: %v", err)))
+		return
+	}
+
+	fmt.Println(titleStyle.Render("\n✅ Signature Generated!"))
+	fmt.Println(promptStyle.Render("   Provide these details to the Warden:"))
+	fmt.Println(infoStyle.Render(fmt.Sprintf("   Timestamp: %d", timestamp)))
+	fmt.Println(infoStyle.Render(fmt.Sprintf("   Signature: %s", hex.EncodeToString(signature[:]))))
+}
+
+func handleBandwidthProof(signer solana.PrivateKey) {
+	client, err := arkham_protocol.NewClient(devnetRpcEndpoint, signer)
+	if err != nil {
+		fmt.Println(warningStyle.Render(fmt.Sprintf("Failed to create Solana client: %v", err)))
+		return
+	}
+
+	seekerPubkeyStr := ""
+	seekerPrompt := &survey.Input{Message: "Enter the Seeker's public key:"}
+	survey.AskOne(seekerPrompt, &seekerPubkeyStr, survey.WithValidator(survey.Required))
+	seekerPubkey, err := solana.PublicKeyFromBase58(seekerPubkeyStr)
+	if err != nil {
+		fmt.Println(warningStyle.Render("Invalid Seeker public key."))
+		return
+	}
+
+	mbConsumedStr := "10"
+	mbPrompt := &survey.Input{Message: "Enter MB consumed:", Default: "10"}
+	survey.AskOne(mbPrompt, &mbConsumedStr)
+	mbConsumed, _ := strconv.ParseUint(mbConsumedStr, 10, 64)
+
+	timestampStr := ""
+	tsPrompt := &survey.Input{Message: "Enter the Timestamp from the Seeker:"}
+	survey.AskOne(tsPrompt, &timestampStr, survey.WithValidator(survey.Required))
+	timestamp, err := strconv.ParseInt(timestampStr, 10, 64)
+	if err != nil {
+		fmt.Println(warningStyle.Render("Invalid timestamp."))
+		return
+	}
+
+	sigStr := ""
+	sigPrompt := &survey.Input{Message: "Enter the Seeker's Signature (hex):"}
+	survey.AskOne(sigPrompt, &sigStr, survey.WithValidator(survey.Required))
+	seekerSigBytes, err := hex.DecodeString(sigStr)
+	if err != nil || len(seekerSigBytes) != 64 {
+		fmt.Println(warningStyle.Render("Invalid signature format."))
+		return
+	}
+	var seekerSig solana.Signature
+	copy(seekerSig[:], seekerSigBytes)
+
+	fmt.Println(promptStyle.Render(fmt.Sprintf("\nSubmitting bandwidth proof for %d MB...", mbConsumed)))
+	sig, err := client.SubmitBandwidthProof(mbConsumed, seekerPubkey, seekerSig, timestamp)
+	if err != nil {
+		fmt.Println(warningStyle.Render(fmt.Sprintf("\n❌ Bandwidth proof submission failed: %v", err)))
+		return
+	}
+
+	fmt.Println(titleStyle.Render("\n✅ Bandwidth Proof Submitted Successfully!"))
+	fmt.Printf("   Transaction Signature: %s\n", sig.String())
+}
+
+func handleCreateSeekerProfile(db *storage.WalletStorage) {
+	fmt.Println(promptStyle.Render("\nCreating new Seeker wallet..."))
+	newWallet := solana.NewWallet()
+	err := db.SaveWallet("seeker", newWallet.PrivateKey)
+	if err != nil {
+		fmt.Println(warningStyle.Render(fmt.Sprintf("❌ Failed to save new seeker wallet: %v", err)))
+		return
+	}
+	fmt.Println(titleStyle.Render("\n✅ Seeker Profile Created!"))
+	fmt.Println(promptStyle.Render("   Your seeker wallet address:"), newWallet.PublicKey().String())
+	fmt.Println(promptStyle.Render("\nPress Enter to continue..."))
+	fmt.Scanln()
+}
+
+func handleDepositEscrow(signer solana.PrivateKey) {
+	client, err := arkham_protocol.NewClient(devnetRpcEndpoint, signer)
+	if err != nil {
+		fmt.Println(warningStyle.Render(fmt.Sprintf("Failed to create Solana client: %v", err)))
+		return
+	}
+
+	amountStr := ""
+	amountPrompt := &survey.Input{Message: "Enter amount of SOL to deposit into escrow:"}
+	survey.AskOne(amountPrompt, &amountStr, survey.WithValidator(survey.Required))
+
+	amountFloat, err := strconv.ParseFloat(amountStr, 64)
+	if err != nil {
+		fmt.Println(warningStyle.Render("Invalid amount entered."))
+		return
+	}
+	amountLamports := uint64(amountFloat * float64(solana.LAMPORTS_PER_SOL))
+
+	fmt.Println(promptStyle.Render(fmt.Sprintf("\nDepositing %f SOL into escrow...", amountFloat)))
+	sig, err := client.DepositEscrow(amountLamports)
+	if err != nil {
+		fmt.Println(warningStyle.Render(fmt.Sprintf("\n❌ Escrow deposit failed: %v", err)))
+		return
+	}
+
+	fmt.Println(titleStyle.Render("\n✅ Escrow Deposit Successful!"))
+	fmt.Printf("   Transaction Signature: %s\n", sig.String())
+}
+
+func handleStartConnection(signer solana.PrivateKey) {
+	client, err := arkham_protocol.NewClient(devnetRpcEndpoint, signer)
+	if err != nil {
+		fmt.Println(warningStyle.Render(fmt.Sprintf("Failed to create Solana client: %v", err)))
+		return
+	}
+
+	wardenPubkeyStr := ""
+	wardenPrompt := &survey.Input{Message: "Enter the Warden's public key to connect to:"}
+	survey.AskOne(wardenPrompt, &wardenPubkeyStr, survey.WithValidator(survey.Required))
+
+	wardenPubkey, err := solana.PublicKeyFromBase58(wardenPubkeyStr)
+	if err != nil {
+		fmt.Println(warningStyle.Render("Invalid Warden public key."))
+		return
+	}
+
+	// For now, we use a default estimated usage.
+	estimatedMb := uint64(100)
+
+	fmt.Println(promptStyle.Render(fmt.Sprintf("\nStarting connection with Warden %s...", wardenPubkeyStr)))
+	sig, err := client.StartConnection(wardenPubkey, estimatedMb)
+	if err != nil {
+		fmt.Println(warningStyle.Render(fmt.Sprintf("\n❌ Failed to start connection: %v", err)))
+		return
+	}
+
+	fmt.Println(titleStyle.Render("\n✅ Connection Started Successfully!"))
+	fmt.Printf("   This created the on-chain Connection account.\n")
+	fmt.Printf("   Transaction Signature: %s\n", sig.String())
+}
+
+func runInit(db *storage.WalletStorage) {
+	fmt.Println(titleStyle.Render("🚀 Welcome to Arkham! Let's get you set up."))
+	fmt.Println(promptStyle.Render("   Creating new default 'warden' wallet..."))
+	newWallet := solana.NewWallet()
+	err := db.SaveWallet("warden", newWallet.PrivateKey)
+	if err != nil {
+		panic(fmt.Sprintf("❌ Failed to save new warden wallet: %v", err))
+	}
+	fmt.Println(titleStyle.Render("\n✅ Initialization Complete!"))
+	fmt.Println(promptStyle.Render("   Your warden wallet address:"), newWallet.PublicKey().String())
+	fmt.Println(promptStyle.Render("\nPress Enter to continue..."))
+	fmt.Scanln()
+}
+
+func handleWalletManagement(signer solana.PrivateKey) {
+	fmt.Println()
+	menu := &survey.Select{
+		Message: promptStyle.Render("Wallet Management:"),
+		Options: []string{"View Address", "View Balance", "Send SOL", "Export Wallet (UNSAFE)", "Back to Main Menu"},
+	}
+	var choice string
+	survey.AskOne(menu, &choice)
+
+	switch choice {
+	case "View Address":
+		viewAddress(signer)
+	case "View Balance":
+		viewBalance(signer)
+	case "Send SOL":
+		sendSol(signer)
+	case "Export Wallet (UNSAFE)":
+		exportWallet(signer)
+	case "Back to Main Menu":
+		return
+	}
+}
+
+func viewAddress(signer solana.PrivateKey) {
+	fmt.Println(titleStyle.Render("\n🔑 Your Current Wallet Address:"))
+	fmt.Println(signer.PublicKey().String())
+}
+
+func viewBalance(signer solana.PrivateKey) {
+	client, err := arkham_protocol.NewClient(devnetRpcEndpoint, signer)
+	if err != nil {
+		fmt.Println(warningStyle.Render(fmt.Sprintf("Failed to create Solana client: %v", err)))
+		return
+	}
 	fmt.Println(promptStyle.Render("\nChecking balance... Please wait."))
 	balanceLamports, err := client.GetBalance(signer.PublicKey())
 	if err != nil {
 		fmt.Println(warningStyle.Render(fmt.Sprintf("\n❌ Failed to get balance: %v", err)))
 		return
 	}
-
 	balanceSOL := float64(balanceLamports) / float64(solana.LAMPORTS_PER_SOL)
-
 	fmt.Println(titleStyle.Render("\n💰 Your Wallet Balance:"))
 	fmt.Printf("   %.9f SOL\n", balanceSOL)
 }
 
-func viewTxHistory() {
-	privateKey := mustGetWallet()
-	url := fmt.Sprintf("https://explorer.solana.com/address/%s?cluster=devnet", privateKey.PublicKey().String())
-	openURL(url)
-}
-
-func exportWallet() {
+func exportWallet(signer solana.PrivateKey) {
 	fmt.Println(warningStyle.Render("\n⚠️ WARNING: EXPORTING YOUR PRIVATE KEY ⚠️"))
 	fmt.Println(promptStyle.Render("Sharing your private key can result in the permanent loss of your funds."))
 	confirm := false
@@ -222,12 +421,11 @@ func exportWallet() {
 		fmt.Println(promptStyle.Render("\nExport cancelled."))
 		return
 	}
-	privateKey := mustGetWallet()
 	fmt.Println(titleStyle.Render("\n🔐 Your Private Key (Base58):"))
-	fmt.Println(privateKey.String())
+	fmt.Println(signer.String())
 }
 
-func sendSol() {
+func sendSol(signer solana.PrivateKey) {
 	fmt.Println(promptStyle.Render("\n💸 Send SOL"))
 	recipientStr := ""
 	addrPrompt := &survey.Input{Message: "Enter recipient address:"}
@@ -256,7 +454,6 @@ func sendSol() {
 		fmt.Println(promptStyle.Render("\nSend cancelled."))
 		return
 	}
-	signer := mustGetWallet()
 	client, err := arkham_protocol.NewClient(devnetRpcEndpoint, signer)
 	if err != nil {
 		fmt.Println(warningStyle.Render(fmt.Sprintf("Failed to create Solana client: %v", err)))
@@ -272,8 +469,9 @@ func sendSol() {
 	fmt.Printf("   Transaction Signature: %s\n", sig.String())
 }
 
-func handleRegistration() {
+func handleRegistration(signer solana.PrivateKey) {
 	fmt.Println(promptStyle.Render("\n🚀 Warden Registration"))
+	// ... (rest of the function needs to be updated to accept signer)
 	stakeTokenStr := ""
 	tokenPrompt := &survey.Select{
 		Message: "Choose your stake token:",
@@ -306,7 +504,6 @@ func handleRegistration() {
 	} else {
 		amountLamports = uint64(stakeAmountFloat * 1_000_000)
 	}
-	signer := mustGetWallet()
 	client, err := arkham_protocol.NewClient(devnetRpcEndpoint, signer)
 	if err != nil {
 		fmt.Println(warningStyle.Render(fmt.Sprintf("Failed to create Solana client: %v", err)))
@@ -332,34 +529,9 @@ func handleRegistration() {
 	fmt.Printf("   Transaction Signature: %s\n", sig.String())
 }
 
-func isInitialized() bool {
-	db, err := storage.Connect()
-	if err != nil {
-		return false
-	}
-	defer func() {
-		// No need to close anything for JSON DB
-	}()
-	_, err = db.GetWallet()
+func isInitialized(db *storage.WalletStorage) bool {
+	_, err := db.GetWallet("warden")
 	return err == nil
-}
-
-func mustGetWallet() solana.PrivateKey {
-	db, err := storage.Connect()
-	if err != nil {
-		panic(fmt.Sprintf("failed to connect to database: %v", err))
-	}
-	defer func() {
-		// No need to close anything for JSON DB
-	}()
-	walletModel, err := db.GetWallet()
-	if err != nil {
-		panic(fmt.Sprintf("critical: wallet not found or is invalid. If this issue persists, try deleting the wallet file and restarting the application. Error: %v", err))
-	}
-
-	// The check for length is now in GetWallet, so we can just return the key.
-	// walletModel.PrivateKey is []byte, which is the type of solana.PrivateKey in this library version.
-	return walletModel.PrivateKey
 }
 
 func openURL(url string) {

@@ -170,7 +170,7 @@ func (c *Client) InitializeWarden(
 	sigOffset := uint16(16)
 	keyOffset := sigOffset + 64
 	msgOffset := keyOffset + 32
-	
+
 	ed25519InstrData := []byte{1, 0} // num_signatures, padding
 	ed25519InstrData = binary.LittleEndian.AppendUint16(ed25519InstrData, sigOffset)
 	ed25519InstrData = binary.LittleEndian.AppendUint16(ed25519InstrData, 0xFFFF) // sig instruction index
@@ -179,7 +179,7 @@ func (c *Client) InitializeWarden(
 	ed25519InstrData = binary.LittleEndian.AppendUint16(ed25519InstrData, msgOffset)
 	ed25519InstrData = binary.LittleEndian.AppendUint16(ed25519InstrData, uint16(len(messageHash)))
 	ed25519InstrData = binary.LittleEndian.AppendUint16(ed25519InstrData, 0xFFFF) // msg instruction index
-	
+
 	ed25519InstrData = append(ed25519InstrData, signature...)
 	ed25519InstrData = append(ed25519InstrData, oracleAuthority[:]...)
 	ed25519InstrData = append(ed25519InstrData, messageHash...)
@@ -293,6 +293,211 @@ func (c *Client) InitializeWarden(
 	return &sig, nil
 }
 
+// SubmitBandwidthProof sends a transaction to the blockchain to submit a bandwidth proof.
+func (c *Client) SubmitBandwidthProof(
+	mbConsumed uint64,
+	seekerPublicKey solana.PublicKey,
+	seekerSignature solana.Signature,
+	timestamp int64,
+) (*solana.Signature, error) {
+
+	// 1. Derive all required PDAs
+	// -----------------------------
+	wardenPublicKey := c.Signer.PublicKey()
+	wardenPDA, _, err := c.GetWardenPDA()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get warden PDA: %w", err)
+	}
+	seekerPDA, _, err := GetSeekerPDA(seekerPublicKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get seeker PDA: %w", err)
+	}
+	
+	// FIX: Use PDAs (not authorities) for connection PDA
+	connectionPDA, _, err := GetConnectionPDA(seekerPDA, wardenPDA)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get connection PDA: %w", err)
+	}
+	protocolConfigPDA, _, err := c.GetProtocolConfigPDA()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get protocol config PDA: %w", err)
+	}
+
+	// 2. Construct the message that was signed
+	// -----------------------------------------
+	msgBuffer := new(bytes.Buffer)
+	msgBuffer.Write(connectionPDA.Bytes())
+	binary.Write(msgBuffer, binary.LittleEndian, mbConsumed)
+	binary.Write(msgBuffer, binary.LittleEndian, timestamp)
+
+	hasher := sha3.NewLegacyKeccak256()
+	hasher.Write(msgBuffer.Bytes())
+	messageHash := hasher.Sum(nil)
+
+	// 3. Generate the Warden's signature
+	// -----------------------------------
+	wardenSignature, err := c.Signer.Sign(messageHash)
+	if err != nil {
+		return nil, fmt.Errorf("failed to sign message as warden: %w", err)
+	}
+
+	// 4. Build the Ed25519 instructions
+	// -----------------------------------
+	// Ed25519 instruction data layout:
+	// [num_signatures: u8, padding: u8, 
+	//  sig_offset: u16, sig_index: u16, 
+	//  pk_offset: u16, pk_index: u16, 
+	//  msg_offset: u16, msg_size: u16, msg_index: u16,
+	//  signature: 64 bytes, public_key: 32 bytes, message: variable bytes]
+
+	sigOffset := uint16(16)  // Header is 16 bytes
+	pkOffset := sigOffset + 64
+	msgOffset := pkOffset + 32
+
+	// FIX: Create SEEKER instruction FIRST (to match Rust expectation at index 0)
+	seekerSigIxData := new(bytes.Buffer)
+	seekerSigIxData.WriteByte(1)  // num_signatures
+	seekerSigIxData.WriteByte(0)  // padding
+	binary.Write(seekerSigIxData, binary.LittleEndian, sigOffset)
+	binary.Write(seekerSigIxData, binary.LittleEndian, uint16(0xFFFF))
+	binary.Write(seekerSigIxData, binary.LittleEndian, pkOffset)
+	binary.Write(seekerSigIxData, binary.LittleEndian, uint16(0xFFFF))
+	binary.Write(seekerSigIxData, binary.LittleEndian, msgOffset)
+	binary.Write(seekerSigIxData, binary.LittleEndian, uint16(len(messageHash)))
+	binary.Write(seekerSigIxData, binary.LittleEndian, uint16(0xFFFF))
+	seekerSigIxData.Write(seekerSignature[:])  // Signature bytes
+	seekerSigIxData.Write(seekerPublicKey[:])  // Public key bytes
+	seekerSigIxData.Write(messageHash)         // Message hash
+
+	seekerSigInstruction := solana.NewInstruction(
+		Ed25519ProgramID,
+		[]*solana.AccountMeta{},
+		seekerSigIxData.Bytes(),
+	)
+
+	// Create WARDEN instruction SECOND (to match Rust expectation at index 1)
+	wardenSigIxData := new(bytes.Buffer)
+	wardenSigIxData.WriteByte(1)  // num_signatures
+	wardenSigIxData.WriteByte(0)  // padding
+	binary.Write(wardenSigIxData, binary.LittleEndian, sigOffset)
+	binary.Write(wardenSigIxData, binary.LittleEndian, uint16(0xFFFF))
+	binary.Write(wardenSigIxData, binary.LittleEndian, pkOffset)
+	binary.Write(wardenSigIxData, binary.LittleEndian, uint16(0xFFFF))
+	binary.Write(wardenSigIxData, binary.LittleEndian, msgOffset)
+	binary.Write(wardenSigIxData, binary.LittleEndian, uint16(len(messageHash)))
+	binary.Write(wardenSigIxData, binary.LittleEndian, uint16(0xFFFF))
+	wardenSigIxData.Write(wardenSignature[:])  // Signature bytes
+	wardenSigIxData.Write(wardenPublicKey[:])  // Public key bytes
+	wardenSigIxData.Write(messageHash)         // Message hash
+
+	wardenSigInstruction := solana.NewInstruction(
+		Ed25519ProgramID,
+		[]*solana.AccountMeta{},
+		wardenSigIxData.Bytes(),
+	)
+
+	// 5. Build the main SubmitBandwidthProof instruction
+	// --------------------------------------------------
+	submitProofInstruction, err := NewSubmitBandwidthProofInstruction(
+		mbConsumed,
+		timestamp,
+		seekerSignature,
+		wardenSignature,
+		connectionPDA,
+		wardenPDA,
+		seekerPDA,
+		protocolConfigPDA,
+		solana.SysVarInstructionsPubkey,
+		c.Signer.PublicKey(), // Submitter is the warden
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create SubmitBandwidthProof instruction: %w", err)
+	}
+
+	// 6. Build and send the transaction
+	// ---------------------------------
+	// FIX: Order is now SEEKER, WARDEN, SUBMIT (matches Rust expectation)
+	latestBlockhash, err := c.RpcClient.GetLatestBlockhash(context.Background(), rpc.CommitmentFinalized)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get latest blockhash: %w", err)
+	}
+
+	tx, err := solana.NewTransaction(
+		[]solana.Instruction{
+			seekerSigInstruction,  // Index 0 - Seeker
+			wardenSigInstruction,  // Index 1 - Warden
+			submitProofInstruction, // Index 2 - Main instruction
+		},
+		latestBlockhash.Value.Blockhash,
+		solana.TransactionPayer(c.Signer.PublicKey()),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create transaction: %w", err)
+	}
+
+	_, err = tx.Sign(
+		func(key solana.PublicKey) *solana.PrivateKey {
+			if c.Signer.PublicKey().Equals(key) {
+				return &c.Signer
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to sign transaction: %w", err)
+	}
+
+	sig, err := c.RpcClient.SendTransaction(context.Background(), tx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send transaction: %w", err)
+	}
+
+	return &sig, nil
+}
+
+// GenerateBandwidthProofSignature creates a signature for a bandwidth proof.
+func (c *Client) GenerateBandwidthProofSignature(
+	wardenAuthority solana.PublicKey,
+	mbConsumed uint64,
+	timestamp int64,
+) (solana.Signature, error) {
+	seekerAuthority := c.Signer.PublicKey()
+
+	// FIX: Get the actual PDAs first
+	seekerPDA, _, err := GetSeekerPDA(seekerAuthority)
+	if err != nil {
+		return solana.Signature{}, fmt.Errorf("failed to get seeker PDA: %w", err)
+	}
+	wardenPDA, _, err := GetWardenPDAForAuthority(wardenAuthority)
+	if err != nil {
+		return solana.Signature{}, fmt.Errorf("failed to get warden PDA: %w", err)
+	}
+	
+	// FIX: Use PDAs (not authorities) for connection PDA
+	connectionPDA, _, err := GetConnectionPDA(seekerPDA, wardenPDA)
+	if err != nil {
+		return solana.Signature{}, fmt.Errorf("failed to get connection PDA: %w", err)
+	}
+
+	// Construct the exact same message as the smart contract expects
+	msgBuffer := new(bytes.Buffer)
+	msgBuffer.Write(connectionPDA.Bytes())
+	binary.Write(msgBuffer, binary.LittleEndian, mbConsumed)
+	binary.Write(msgBuffer, binary.LittleEndian, timestamp)
+
+	hasher := sha3.NewLegacyKeccak256()
+	hasher.Write(msgBuffer.Bytes())
+	messageHash := hasher.Sum(nil)
+
+	seekerSignature, err := c.Signer.Sign(messageHash)
+	if err != nil {
+		return solana.Signature{}, fmt.Errorf("failed to sign message as seeker: %w", err)
+	}
+
+	return seekerSignature, nil
+}
+
+
 // SendSol sends a specified amount of SOL to a recipient.
 func (c *Client) SendSol(recipient solana.PublicKey, amountLamports uint64) (*solana.Signature, error) {
 	latestBlockhash, err := c.RpcClient.GetLatestBlockhash(context.Background(), rpc.CommitmentFinalized)
@@ -359,6 +564,29 @@ func (c *Client) GetWardenPDA() (solana.PublicKey, uint8, error) {
 	)
 }
 
+// GetSeekerPDA returns the PDA for a given seeker's authority.
+func GetSeekerPDA(seekerAuthority solana.PublicKey) (solana.PublicKey, uint8, error) {
+	return solana.FindProgramAddress(
+		[][]byte{
+			[]byte("seeker"),
+			seekerAuthority.Bytes(),
+		},
+		ProgramID,
+	)
+}
+
+// GetConnectionPDA returns the PDA for a connection.
+func GetConnectionPDA(seekerPDA, wardenPDA solana.PublicKey) (solana.PublicKey, uint8, error) {
+	return solana.FindProgramAddress(
+		[][]byte{
+			[]byte("connection"),
+			seekerPDA.Bytes(),
+			wardenPDA.Bytes(),
+		},
+		ProgramID,
+	)
+}
+
 // GetSolVaultPDA returns the PDA for the protocol's SOL vault.
 func (c *Client) GetSolVaultPDA() (solana.PublicKey, uint8, error) {
 	return solana.FindProgramAddress(
@@ -394,10 +622,159 @@ func (c *Client) IsWardenRegistered() (bool, error) {
 
 	resp, err := c.RpcClient.GetAccountInfo(context.Background(), wardenPDA)
 	if err != nil {
-		// Consider RPC errors as a reason to halt, rather than assuming not registered.
+		// The account not being found is an error from the RPC client's perspective,
+		// but for our logic, it's a valid state meaning "not registered".
+		// We check if the response value is nil, which is true when the account is not found.
+		// Any other error (network, etc.) is a real problem.
+		if resp == nil {
+			return false, nil
+		}
 		return false, fmt.Errorf("failed to get warden account info: %w", err)
 	}
 
-	// If the account exists and has data, the user is registered.
-	return resp.Value != nil, nil
+	// If there was no RPC error and the account value is nil, it also means not found.
+	if resp.Value == nil {
+		return false, nil
+	}
+
+	// If we have the account, the user is registered.
+	return true, nil
+}
+
+// DepositEscrow deposits SOL into the seeker's on-chain escrow account.
+func (c *Client) DepositEscrow(amountLamports uint64) (*solana.Signature, error) {
+	// The Seeker is the signer for this transaction.
+	seekerAuthority := c.Signer.PublicKey()
+	seekerPDA, _, err := GetSeekerPDA(seekerAuthority)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get seeker PDA: %w", err)
+	}
+
+	// The new smart contract (with init_if_needed) handles account creation.
+	// We just need to call the single instruction.
+	depositInstruction, err := NewDepositEscrowInstruction(
+		amountLamports,
+		false, // usePrivate is false for now
+		seekerPDA,
+		seekerAuthority,
+		solana.SystemProgramID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create DepositEscrow instruction: %w", err)
+	}
+
+	latestBlockhash, err := c.RpcClient.GetLatestBlockhash(context.Background(), rpc.CommitmentFinalized)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get latest blockhash: %w", err)
+	}
+
+	tx, err := solana.NewTransaction(
+		[]solana.Instruction{depositInstruction},
+		latestBlockhash.Value.Blockhash,
+		solana.TransactionPayer(c.Signer.PublicKey()),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create transaction: %w", err)
+	}
+
+	_, err = tx.Sign(
+		func(key solana.PublicKey) *solana.PrivateKey {
+			if c.Signer.PublicKey().Equals(key) {
+				return &c.Signer
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to sign transaction: %w", err)
+	}
+
+	sig, err := c.RpcClient.SendTransaction(context.Background(), tx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send transaction: %w", err)
+	}
+
+	return &sig, nil
+}
+
+func (c *Client) StartConnection(wardenAuthority solana.PublicKey, estimatedMb uint64) (*solana.Signature, error) {
+	seekerAuthority := c.Signer.PublicKey()
+
+	// First get the PDAs for seeker and warden
+	seekerPDA, _, err := GetSeekerPDA(seekerAuthority)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get seeker PDA: %w", err)
+	}
+	wardenPDA, _, err := GetWardenPDAForAuthority(wardenAuthority)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get warden PDA: %w", err)
+	}
+
+	// FIX: Now derive connection PDA using the actual PDAs
+	connectionPDA, _, err := GetConnectionPDA(seekerPDA, wardenPDA)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get connection PDA: %w", err)
+	}
+
+	protocolConfigPDA, _, err := c.GetProtocolConfigPDA()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get protocol config PDA: %w", err)
+	}
+
+	instruction, err := NewStartConnectionInstruction(
+		estimatedMb,
+		connectionPDA,
+		seekerPDA,
+		wardenPDA,
+		seekerAuthority,
+		protocolConfigPDA,
+		solana.SystemProgramID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create StartConnection instruction: %w", err)
+	}
+
+	latestBlockhash, err := c.RpcClient.GetLatestBlockhash(context.Background(), rpc.CommitmentFinalized)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get latest blockhash: %w", err)
+	}
+
+	tx, err := solana.NewTransaction(
+		[]solana.Instruction{instruction},
+		latestBlockhash.Value.Blockhash,
+		solana.TransactionPayer(c.Signer.PublicKey()),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create transaction: %w", err)
+	}
+
+	_, err = tx.Sign(
+		func(key solana.PublicKey) *solana.PrivateKey {
+			if c.Signer.PublicKey().Equals(key) {
+				return &c.Signer
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to sign transaction: %w", err)
+	}
+
+	sig, err := c.RpcClient.SendTransaction(context.Background(), tx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send transaction: %w", err)
+	}
+
+	return &sig, nil
+}
+
+// GetWardenPDAForAuthority is a helper to get a warden PDA for a specific public key.
+func GetWardenPDAForAuthority(wardenAuthority solana.PublicKey) (solana.PublicKey, uint8, error) {
+	return solana.FindProgramAddress(
+		[][]byte{
+			[]byte("warden"),
+			wardenAuthority.Bytes(),
+		},
+		ProgramID,
+	)
 }

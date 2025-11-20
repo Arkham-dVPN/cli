@@ -15,4 +15,7 @@ var (
 	warningStyle = lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#FF6347")). // Tomato red
 		Bold(true)
+
+	infoStyle = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#00BFFF")) // Deep Sky Blue
 )

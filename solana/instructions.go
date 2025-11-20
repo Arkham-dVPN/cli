@@ -186,7 +186,6 @@ func NewDepositEscrowInstruction(
 	// Accounts:
 	seekerAccount solanago.PublicKey,
 	authorityAccount solanago.PublicKey,
-	seekerEscrowAccount solanago.PublicKey,
 	systemProgramAccount solanago.PublicKey,
 ) (solanago.Instruction, error) {
 	buf__ := new(bytes.Buffer)
@@ -217,9 +216,7 @@ func NewDepositEscrowInstruction(
 		accounts__.Append(solanago.NewAccountMeta(seekerAccount, true, false))
 		// Account 1 "authority": Writable, Signer, Required
 		accounts__.Append(solanago.NewAccountMeta(authorityAccount, true, true))
-		// Account 2 "seeker_escrow": Writable, Non-signer, Required
-		accounts__.Append(solanago.NewAccountMeta(seekerEscrowAccount, true, false))
-		// Account 3 "system_program": Read-only, Non-signer, Required
+		// Account 2 "system_program": Read-only, Non-signer, Required
 		accounts__.Append(solanago.NewAccountMeta(systemProgramAccount, false, false))
 	}
 
@@ -659,6 +656,7 @@ func NewStartConnectionInstruction(
 func NewSubmitBandwidthProofInstruction(
 	// Params:
 	mbConsumedParam uint64,
+	timestampParam int64,
 	seekerSignatureParam [64]uint8,
 	wardenSignatureParam [64]uint8,
 
@@ -683,6 +681,11 @@ func NewSubmitBandwidthProofInstruction(
 		err = enc__.Encode(mbConsumedParam)
 		if err != nil {
 			return nil, errors.NewField("mbConsumedParam", err)
+		}
+		// Serialize `timestampParam`:
+		err = enc__.Encode(timestampParam)
+		if err != nil {
+			return nil, errors.NewField("timestampParam", err)
 		}
 		// Serialize `seekerSignatureParam`:
 		err = enc__.Encode(seekerSignatureParam)

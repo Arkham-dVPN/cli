@@ -1,15 +1,11 @@
 module arkham-cli
 
-go 1.24.1
-
-toolchain go1.24.4
+go 1.24.4
 
 require (
 	github.com/AlecAivazis/survey/v2 v2.3.7
 	github.com/charmbracelet/lipgloss v0.9.1
 	github.com/common-nighthawk/go-figure v0.0.0-20210622060536-734e95fb86be
-	github.com/gagliardetto/anchor-go v1.0.0
-	github.com/gagliardetto/binary v0.8.0
 	github.com/gagliardetto/solana-go v1.14.0
 	github.com/joho/godotenv v1.5.1
 	github.com/libp2p/go-libp2p v0.32.2
@@ -20,6 +16,7 @@ require (
 )
 
 require (
+	arkham-cli/solana v0.0.0-00010101000000-000000000000 // indirect
 	filippo.io/edwards25519 v1.0.0-rc.1 // indirect
 	github.com/andres-erbsen/clock v0.0.0-20160526145045-9e14626cd129 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
@@ -37,6 +34,8 @@ require (
 	github.com/fatih/color v1.9.0 // indirect
 	github.com/flynn/noise v1.0.0 // indirect
 	github.com/francoispqt/gojay v1.2.13 // indirect
+	github.com/gagliardetto/anchor-go v0.3.2 // indirect
+	github.com/gagliardetto/binary v0.8.0 // indirect
 	github.com/gagliardetto/treeout v0.1.4 // indirect
 	github.com/go-logr/logr v1.2.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
@@ -159,3 +158,5 @@ require (
 	google.golang.org/protobuf v1.31.0 // indirect
 	lukechampine.com/blake3 v1.2.1 // indirect
 )
+
+replace arkham-cli/solana => ./solana
