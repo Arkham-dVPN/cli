@@ -1,4 +1,4 @@
 arkham-cli
 .env
-
+*.diff
 /config/wallet.json

@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/programs/system"
@@ -29,7 +30,7 @@ type Client struct {
 	Signer    solana.PrivateKey
 }
 
-// NewClient creates a new Client for the Arkham Protocol.
+// NewClient creates a new Client for the Arkham Protocol with a specific signer.
 func NewClient(rpcEndpoint string, signer solana.PrivateKey) (*Client, error) {
 	// Create a new RPC client.
 	rpcClient := rpc.New(rpcEndpoint)
@@ -37,6 +38,21 @@ func NewClient(rpcEndpoint string, signer solana.PrivateKey) (*Client, error) {
 	return &Client{
 		RpcClient: rpcClient,
 		Signer:    signer,
+	}, nil
+}
+
+// NewReadOnlyClient creates a new client for read-only operations that don't require a signer.
+// It uses a dummy keypair internally.
+func NewReadOnlyClient(rpcEndpoint string) (*Client, error) {
+	// Create a new RPC client.
+	rpcClient := rpc.New(rpcEndpoint)
+
+	// Create a dummy wallet for read-only operations.
+	dummyWallet := solana.NewWallet()
+
+	return &Client{
+		RpcClient: rpcClient,
+		Signer:    dummyWallet.PrivateKey,
 	}, nil
 }
 
@@ -555,6 +571,43 @@ func (c *Client) GetBalance(publicKey solana.PublicKey) (uint64, error) {
 	return balance.Value, nil
 }
 
+// GetTokenBalance retrieves the balance for a specific token mint for a given public key.
+func (c *Client) GetTokenBalance(owner solana.PublicKey, mint solana.PublicKey) (uint64, error) {
+	// Find the associated token address.
+	ata, _, err := solana.FindAssociatedTokenAddress(owner, mint)
+	if err != nil {
+		return 0, fmt.Errorf("failed to find associated token address: %w", err)
+	}
+
+	// Get the balance of the ATA.
+	balance, err := c.RpcClient.GetTokenAccountBalance(
+		context.Background(),
+		ata,
+		rpc.CommitmentFinalized,
+	)
+	if err != nil {
+		// If the account is not found, it just means the balance is 0.
+		// Check for the specific RPC error text.
+		if err.Error() == "not found" || strings.Contains(err.Error(), "could not find account") {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("failed to get token account balance for ATA %s: %w", ata.String(), err)
+	}
+
+	if balance.Value == nil {
+		return 0, nil // Account exists but has no value object, treat as 0.
+	}
+
+	// The balance is returned as a string, parse it to uint64.
+	amount, err := strconv.ParseUint(balance.Value.Amount, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse token amount string: %w", err)
+	}
+
+	return amount, nil
+}
+
+
 // GetWardenPDA returns the PDA for the current user's warden account.
 func (c *Client) GetWardenPDA() (solana.PublicKey, uint8, error) {
 	return solana.FindProgramAddress(
@@ -642,6 +695,23 @@ func (c *Client) IsWardenRegistered() (bool, error) {
 	}
 
 	// If we have the account, the user is registered.
+	return true, nil
+}
+
+// IsSeekerRegistered checks if a Seeker account exists for the client's public key.
+func (c *Client) IsSeekerRegistered() (bool, error) {
+	seekerPDA, _, err := GetSeekerPDA(c.Signer.PublicKey())
+	if err != nil {
+		return false, fmt.Errorf("failed to get seeker PDA: %w", err)
+	}
+
+	_, err = c.RpcClient.GetAccountInfo(context.Background(), seekerPDA)
+	if err != nil {
+		if err == rpc.ErrNotFound {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to check for seeker account: %w", err)
+	}
 	return true, nil
 }
 

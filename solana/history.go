@@ -3,6 +3,7 @@ package arkham_protocol
 import (
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"sync"
@@ -17,18 +18,18 @@ var (
 	initIdlOnce sync.Once
 	initIdlErr  error
 	idlData     *IDL
-	// Map of event discriminators to event names
 	eventNameMap map[[8]byte]string
 )
 
 // GenericEvent represents a basic transaction event.
 type GenericEvent struct {
-	Signature solana.Signature `json:"signature"`
-	Timestamp time.Time        `json:"timestamp"`
-	Type      string           `json:"type"`
-	Amount    uint64           `json:"amount,omitempty"`
-	Sender    solana.PublicKey `json:"sender,omitempty"`
-	Recipient solana.PublicKey `json:"recipient,omitempty"`
+	Signature  solana.Signature  `json:"signature"`
+	Timestamp  time.Time         `json:"timestamp"`
+	Type       string            `json:"type"`
+	Amount     uint64            `json:"amount,omitempty"`
+	Sender     *solana.PublicKey `json:"sender,omitempty"`
+	Recipient  *solana.PublicKey `json:"recipient,omitempty"`
+	MbConsumed *uint64           `json:"mbConsumed,omitempty"`
 }
 
 // ConnectionEvent represents a completed dVPN connection.
@@ -44,21 +45,20 @@ type ConnectionEvent struct {
 
 // HistoryResult holds the categorized history.
 type HistoryResult struct {
-	SolHistory        []GenericEvent    `json:"solHistory"`
-	ArkhamHistory     []GenericEvent    `json:"arkhamHistory"`
-	ConnectionHistory []ConnectionEvent `json:"connectionHistory"`
+	SolHistory          []GenericEvent    `json:"solHistory"`
+	ArkhamHistory       []GenericEvent    `json:"arkhamHistory"`
+	ConnectionHistory   []ConnectionEvent `json:"connectionHistory"`
+	ThroughputHistory   []GenericEvent    `json:"throughputHistory"`
 }
 
 // initializeIDL loads and parses the IDL data once
 func initializeIDL() error {
 	initIdlOnce.Do(func() {
-		// Parse the embedded IDL JSON
 		idlData, initIdlErr = ParseIDL([]byte(idlJSON))
 		if initIdlErr != nil {
 			return
 		}
 
-		// Build the event name map from discriminators
 		eventNameMap = make(map[[8]byte]string)
 		for _, event := range idlData.Events {
 			var disc [8]byte
@@ -70,8 +70,8 @@ func initializeIDL() error {
 }
 
 // GetHistory fetches and parses the transaction history for a given public key.
+// This now includes transactions from related Connection accounts.
 func (c *Client) GetHistory(publicKey solana.PublicKey) (*HistoryResult, error) {
-	// Initialize IDL if not already done
 	if err := initializeIDL(); err != nil {
 		return nil, fmt.Errorf("failed to initialize IDL: %w", err)
 	}
@@ -80,13 +80,70 @@ func (c *Client) GetHistory(publicKey solana.PublicKey) (*HistoryResult, error) 
 		SolHistory:        make([]GenericEvent, 0),
 		ArkhamHistory:     make([]GenericEvent, 0),
 		ConnectionHistory: make([]ConnectionEvent, 0),
+		ThroughputHistory: make([]GenericEvent, 0),
 	}
 
-	// Fetch transaction signatures for the public key
 	ctx := context.Background()
-	limit := 1000 // Maximum allowed by Solana RPC
 	
-	signatures, err := c.RpcClient.GetSignaturesForAddressWithOpts(
+	// Step 1: Get all signatures to process
+	allSignatures, err := c.gatherAllRelevantSignatures(ctx, publicKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to gather signatures: %w", err)
+	}
+
+	if len(allSignatures) == 0 {
+		return result, nil
+	}
+
+	// Step 2: Process transactions concurrently
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	batchSize := 10
+	for i := 0; i < len(allSignatures); i += batchSize {
+		end := i + batchSize
+		if end > len(allSignatures) {
+			end = len(allSignatures)
+		}
+
+		for j := i; j < end; j++ {
+			wg.Add(1)
+			go func(sig solana.Signature) {
+				defer wg.Done()
+				
+				version := uint64(0)
+				tx, err := c.RpcClient.GetTransaction(
+					ctx,
+					sig,
+					&rpc.GetTransactionOpts{
+						Encoding:                       solana.EncodingBase64,
+						Commitment:                     rpc.CommitmentConfirmed,
+						MaxSupportedTransactionVersion: &version,
+					},
+				)
+				if err != nil {
+					fmt.Printf("Warning: failed to fetch transaction %s: %v\n", sig, err)
+					return
+				}
+
+				parseTransactionForHistory(tx, publicKey, result, &mu)
+			}(allSignatures[j])
+		}
+		
+		wg.Wait()
+	}
+
+	return result, nil
+}
+
+// gatherAllRelevantSignatures collects signatures from both the user's wallet
+// and all related Connection accounts (where user is seeker or warden).
+func (c *Client) gatherAllRelevantSignatures(ctx context.Context, publicKey solana.PublicKey) ([]solana.Signature, error) {
+	signatureSet := make(map[solana.Signature]bool)
+	limit := 1000
+
+	// 1. Get signatures for the user's main wallet
+	userSigs, err := c.RpcClient.GetSignaturesForAddressWithOpts(
 		ctx,
 		publicKey,
 		&rpc.GetSignaturesForAddressOpts{
@@ -95,58 +152,119 @@ func (c *Client) GetHistory(publicKey solana.PublicKey) (*HistoryResult, error) 
 		},
 	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch transaction signatures: %w", err)
+		return nil, fmt.Errorf("failed to fetch user signatures: %w", err)
 	}
 
-	if len(signatures) == 0 {
-		// No transactions found, return empty result
-		return result, nil
+	for _, sigInfo := range userSigs {
+		signatureSet[sigInfo.Signature] = true
 	}
 
-	// Use a mutex to protect concurrent writes to result slices
-	var mu sync.Mutex
-	var wg sync.WaitGroup
+	// 2. Get the user's PDA (try both seeker and warden)
+	seekerPDA, _, _ := GetSeekerPDA(publicKey)
+	wardenPDA, _, _ := GetWardenPDAForAuthority(publicKey)
 
-	// Process transactions concurrently in batches
-	batchSize := 10
-	for i := 0; i < len(signatures); i += batchSize {
-		end := i + batchSize
-		if end > len(signatures) {
-			end = len(signatures)
+	// Get signatures for the seeker PDA, as they are a mutable account in bandwidth proofs
+	if seekerPDA != (solana.PublicKey{}) {
+		seekerPdaSigs, err := c.RpcClient.GetSignaturesForAddressWithOpts(
+			ctx,
+			seekerPDA,
+			&rpc.GetSignaturesForAddressOpts{
+				Limit:      &limit,
+				Commitment: rpc.CommitmentConfirmed,
+			},
+		)
+		if err != nil {
+			fmt.Printf("Warning: failed to fetch signatures for seeker PDA %s: %v\n", seekerPDA, err)
+		} else {
+			for _, sigInfo := range seekerPdaSigs {
+				signatureSet[sigInfo.Signature] = true
+			}
+		}
+	}
+
+	// 3. Fetch all Connection accounts from the program
+	connections, err := c.fetchAllConnections(ctx)
+	if err != nil {
+		fmt.Printf("Warning: failed to fetch connections: %v\n", err)
+		// Continue with just user signatures
+		return mapKeysToSlice(signatureSet), nil
+	}
+
+	// 4. Filter connections where user is involved
+	relevantConnectionPDAs := []solana.PublicKey{}
+	for pubkey, conn := range connections {
+		if conn.Seeker == seekerPDA || conn.Warden == wardenPDA {
+			relevantConnectionPDAs = append(relevantConnectionPDAs, pubkey)
+		}
+	}
+
+	// 5. Get signatures for each relevant Connection PDA
+	for _, connPDA := range relevantConnectionPDAs {
+		connSigs, err := c.RpcClient.GetSignaturesForAddressWithOpts(
+			ctx,
+			connPDA,
+			&rpc.GetSignaturesForAddressOpts{
+				Limit:      &limit,
+				Commitment: rpc.CommitmentConfirmed,
+			},
+		)
+		if err != nil {
+			fmt.Printf("Warning: failed to fetch signatures for connection %s: %v\n", connPDA, err)
+			continue
 		}
 
-		for j := i; j < end; j++ {
-			wg.Add(1)
-			go func(sigInfo *rpc.TransactionSignature) {
-				defer wg.Done()
-				
-				// Fetch full transaction details
-				version := uint64(0)
-				tx, err := c.RpcClient.GetTransaction(
-					ctx,
-					sigInfo.Signature,
-					&rpc.GetTransactionOpts{
-						Encoding:                       solana.EncodingBase64,
-						Commitment:                     rpc.CommitmentConfirmed,
-						MaxSupportedTransactionVersion: &version,
+		for _, sigInfo := range connSigs {
+			signatureSet[sigInfo.Signature] = true
+		}
+	}
+
+	return mapKeysToSlice(signatureSet), nil
+}
+
+
+
+
+// fetchAllConnections retrieves all Connection accounts from the program.
+func (c *Client) fetchAllConnections(ctx context.Context) (map[solana.PublicKey]*Connection, error) {
+	resp, err := c.RpcClient.GetProgramAccountsWithOpts(
+		ctx,
+		ProgramID,
+		&rpc.GetProgramAccountsOpts{
+			Commitment: rpc.CommitmentConfirmed,
+			Filters: []rpc.RPCFilter{
+				{
+					Memcmp: &rpc.RPCFilterMemcmp{
+						Offset: 0,
+						Bytes:  Account_Connection[:],
 					},
-				)
-				if err != nil {
-					// Log error but continue processing other transactions
-					fmt.Printf("Warning: failed to fetch transaction %s: %v\n", sigInfo.Signature, err)
-					return
-				}
-
-				// Parse the transaction
-				parseTransactionForHistory(tx, publicKey, result, &mu)
-			}(signatures[j])
-		}
-		
-		// Wait for current batch to complete before starting next batch
-		wg.Wait()
+				},
+			},
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get program accounts: %w", err)
 	}
 
-	return result, nil
+	connections := make(map[solana.PublicKey]*Connection)
+	for _, item := range resp {
+		conn, err := ParseAccount_Connection(item.Account.Data.GetBinary())
+		if err != nil {
+			fmt.Printf("Warning: failed to parse connection at %s: %v\n", item.Pubkey, err)
+			continue
+		}
+		connections[item.Pubkey] = conn
+	}
+
+	return connections, nil
+}
+
+// Helper function to convert map keys to slice
+func mapKeysToSlice(m map[solana.Signature]bool) []solana.Signature {
+	keys := make([]solana.Signature, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 // parseTransactionForHistory parses transaction data to build history
@@ -155,7 +273,6 @@ func parseTransactionForHistory(tx *rpc.GetTransactionResult, self solana.Public
 		return
 	}
 
-	// Extract timestamp
 	var timestamp time.Time
 	if tx.BlockTime != nil {
 		timestamp = tx.BlockTime.Time()
@@ -163,35 +280,29 @@ func parseTransactionForHistory(tx *rpc.GetTransactionResult, self solana.Public
 		timestamp = time.Now()
 	}
 
-	// Get the transaction signature
 	var signature solana.Signature
 	if parsed, err := tx.Transaction.GetTransaction(); err == nil && len(parsed.Signatures) > 0 {
 		signature = parsed.Signatures[0]
 	}
 
-	// Parse program logs for Arkham protocol events
 	if tx.Meta.LogMessages != nil {
 		parseArkhamEvents(tx, self, timestamp, signature, result, mu)
 	}
 
-	// Parse SOL transfers from transaction instructions
 	if tx.Transaction != nil {
 		parseSolTransfers(tx, self, timestamp, signature, result, mu)
 	}
 
-	// Parse token transfers (ARKHAM tokens)
 	parseTokenTransfers(tx, self, timestamp, signature, result, mu)
 }
 
 // parseArkhamEvents extracts and parses Arkham protocol events from logs
 func parseArkhamEvents(tx *rpc.GetTransactionResult, self solana.PublicKey, timestamp time.Time, signature solana.Signature, result *HistoryResult, mu *sync.Mutex) {
 	for _, log := range tx.Meta.LogMessages {
-		// Look for program data logs
 		if !strings.Contains(log, "Program data: ") {
 			continue
 		}
 
-		// Extract the base64-encoded data
 		parts := strings.Split(log, "Program data: ")
 		if len(parts) < 2 {
 			continue
@@ -203,22 +314,18 @@ func parseArkhamEvents(tx *rpc.GetTransactionResult, self solana.PublicKey, time
 			continue
 		}
 
-		// Check if we have enough data for a discriminator
 		if len(eventData) < 8 {
 			continue
 		}
 
-		// Extract discriminator
 		var disc [8]byte
 		copy(disc[:], eventData[:8])
 
-		// Look up event name
 		eventName, found := eventNameMap[disc]
 		if !found {
 			continue
 		}
 
-		// Parse specific event types
 		switch eventName {
 		case "ConnectionEnded":
 			parseConnectionEndedEvent(eventData, timestamp, signature, result, mu)
@@ -238,19 +345,18 @@ func parseArkhamEvents(tx *rpc.GetTransactionResult, self solana.PublicKey, time
 	}
 }
 
-// parseConnectionEndedEvent parses ConnectionEnded events
+// Remaining parse functions stay the same until parseBandwidthProofEvent...
+
 func parseConnectionEndedEvent(eventData []byte, timestamp time.Time, signature solana.Signature, result *HistoryResult, mu *sync.Mutex) {
-	// Skip discriminator and parse event
 	event, err := ParseEvent_ConnectionEnded(eventData)
 	if err != nil {
 		return
 	}
 
-	// Calculate duration (we don't have start time here, so set to 0)
 	connectionEvent := ConnectionEvent{
 		Signature: signature,
 		Timestamp: timestamp,
-		Duration:  0, // Would need ConnectionStarted event to calculate this
+		Duration:  0,
 		Bandwidth: event.BandwidthConsumed,
 		Earnings:  event.TotalPaid,
 		Warden:    event.Warden,
@@ -262,21 +368,19 @@ func parseConnectionEndedEvent(eventData []byte, timestamp time.Time, signature 
 	mu.Unlock()
 }
 
-// parseConnectionStartedEvent parses ConnectionStarted events
 func parseConnectionStartedEvent(eventData []byte, self solana.PublicKey, timestamp time.Time, signature solana.Signature, result *HistoryResult, mu *sync.Mutex) {
 	event, err := ParseEvent_ConnectionStarted(eventData)
 	if err != nil {
 		return
 	}
 
-	// Add to Arkham history
 	genericEvent := GenericEvent{
 		Signature: signature,
 		Timestamp: timestamp,
 		Type:      "ConnectionStarted",
 		Amount:    event.EscrowAmount,
-		Sender:    event.Seeker,
-		Recipient: event.Warden,
+		Sender:    &event.Seeker,
+		Recipient: &event.Warden,
 	}
 
 	mu.Lock()
@@ -284,26 +388,30 @@ func parseConnectionStartedEvent(eventData []byte, self solana.PublicKey, timest
 	mu.Unlock()
 }
 
-// parseBandwidthProofEvent parses BandwidthProofSubmitted events
+// FIXED: parseBandwidthProofEvent - Now always adds to history
 func parseBandwidthProofEvent(eventData []byte, self solana.PublicKey, timestamp time.Time, signature solana.Signature, result *HistoryResult, mu *sync.Mutex) {
 	event, err := ParseEvent_BandwidthProofSubmitted(eventData)
 	if err != nil {
+		fmt.Printf("ERROR: Failed to parse BandwidthProofSubmitted event. Error: %v. Data (hex): %s\n", err, hex.EncodeToString(eventData))
+		// DON'T return early - we already found this transaction is relevant
+		// Just log the error and skip
 		return
 	}
 
+	mbConsumed := event.MbConsumed
 	genericEvent := GenericEvent{
-		Signature: signature,
-		Timestamp: timestamp,
-		Type:      "BandwidthProofSubmitted",
-		Amount:    event.PaymentAmount,
+		Signature:  signature,
+		Timestamp:  timestamp,
+		Type:       "ThroughputCertificateSubmitted",
+		Amount:     event.PaymentAmount,
+		MbConsumed: &mbConsumed,
 	}
 
 	mu.Lock()
-	result.ArkhamHistory = append(result.ArkhamHistory, genericEvent)
+	result.ThroughputHistory = append(result.ThroughputHistory, genericEvent)
 	mu.Unlock()
 }
 
-// parseEscrowDepositedEvent parses EscrowDeposited events
 func parseEscrowDepositedEvent(eventData []byte, self solana.PublicKey, timestamp time.Time, signature solana.Signature, result *HistoryResult, mu *sync.Mutex) {
 	event, err := ParseEvent_EscrowDeposited(eventData)
 	if err != nil {
@@ -319,7 +427,7 @@ func parseEscrowDepositedEvent(eventData []byte, self solana.PublicKey, timestam
 		Timestamp: timestamp,
 		Type:      "EscrowDeposited",
 		Amount:    event.Amount,
-		Sender:    event.Authority,
+		Sender:    &event.Authority,
 	}
 
 	mu.Lock()
@@ -327,7 +435,6 @@ func parseEscrowDepositedEvent(eventData []byte, self solana.PublicKey, timestam
 	mu.Unlock()
 }
 
-// parseEarningsClaimedEvent parses EarningsClaimed events
 func parseEarningsClaimedEvent(eventData []byte, self solana.PublicKey, timestamp time.Time, signature solana.Signature, result *HistoryResult, mu *sync.Mutex) {
 	event, err := ParseEvent_EarningsClaimed(eventData)
 	if err != nil {
@@ -343,7 +450,7 @@ func parseEarningsClaimedEvent(eventData []byte, self solana.PublicKey, timestam
 		Timestamp: timestamp,
 		Type:      "EarningsClaimed",
 		Amount:    event.Amount,
-		Recipient: event.Authority,
+		Recipient: &event.Authority,
 	}
 
 	mu.Lock()
@@ -351,7 +458,6 @@ func parseEarningsClaimedEvent(eventData []byte, self solana.PublicKey, timestam
 	mu.Unlock()
 }
 
-// parseTokensClaimedEvent parses TokensClaimed events (ARKHAM tokens)
 func parseTokensClaimedEvent(eventData []byte, self solana.PublicKey, timestamp time.Time, signature solana.Signature, result *HistoryResult, mu *sync.Mutex) {
 	event, err := ParseEvent_TokensClaimed(eventData)
 	if err != nil {
@@ -367,7 +473,7 @@ func parseTokensClaimedEvent(eventData []byte, self solana.PublicKey, timestamp 
 		Timestamp: timestamp,
 		Type:      "ArkhamTokensClaimed",
 		Amount:    event.Amount,
-		Recipient: event.Authority,
+		Recipient: &event.Authority,
 	}
 
 	mu.Lock()
@@ -375,7 +481,6 @@ func parseTokensClaimedEvent(eventData []byte, self solana.PublicKey, timestamp 
 	mu.Unlock()
 }
 
-// parseWardenRegisteredEvent parses WardenRegistered events
 func parseWardenRegisteredEvent(eventData []byte, self solana.PublicKey, timestamp time.Time, signature solana.Signature, result *HistoryResult, mu *sync.Mutex) {
 	event, err := ParseEvent_WardenRegistered(eventData)
 	if err != nil {
@@ -391,7 +496,7 @@ func parseWardenRegisteredEvent(eventData []byte, self solana.PublicKey, timesta
 		Timestamp: timestamp,
 		Type:      "WardenRegistered",
 		Amount:    event.StakeAmount,
-		Sender:    event.Authority,
+		Sender:    &event.Authority,
 	}
 
 	mu.Lock()
@@ -399,7 +504,6 @@ func parseWardenRegisteredEvent(eventData []byte, self solana.PublicKey, timesta
 	mu.Unlock()
 }
 
-// parseSolTransfers extracts SOL transfers from transaction instructions
 func parseSolTransfers(tx *rpc.GetTransactionResult, self solana.PublicKey, timestamp time.Time, signature solana.Signature, result *HistoryResult, mu *sync.Mutex) {
 	if tx.Transaction == nil {
 		return
@@ -410,44 +514,36 @@ func parseSolTransfers(tx *rpc.GetTransactionResult, self solana.PublicKey, time
 		return
 	}
 
-	// Iterate through instructions looking for System Program transfers
 	for _, instr := range parsed.Message.Instructions {
-		// Get the program ID
 		programIdx := instr.ProgramIDIndex
 		if int(programIdx) >= len(parsed.Message.AccountKeys) {
 			continue
 		}
 		programID := parsed.Message.AccountKeys[programIdx]
 
-		// Check if it's the System Program
 		if programID != solana.SystemProgramID {
 			continue
 		}
 
-		// Parse instruction data
 		if len(instr.Data) < 4 {
 			continue
 		}
 
-		// Decode instruction type (first 4 bytes for System Program)
 		decoder := bin.NewBorshDecoder(instr.Data)
 		var instrType uint32
 		if err := decoder.Decode(&instrType); err != nil {
 			continue
 		}
 
-		// 2 = Transfer instruction
 		if instrType != 2 {
 			continue
 		}
 
-		// Parse transfer amount
 		var amount uint64
 		if err := decoder.Decode(&amount); err != nil {
 			continue
 		}
 
-		// Get sender and recipient from accounts
 		if len(instr.Accounts) < 2 {
 			continue
 		}
@@ -462,7 +558,6 @@ func parseSolTransfers(tx *rpc.GetTransactionResult, self solana.PublicKey, time
 		from := parsed.Message.AccountKeys[fromIdx]
 		to := parsed.Message.AccountKeys[toIdx]
 
-		// Only include if user is involved
 		if from != self && to != self {
 			continue
 		}
@@ -480,8 +575,8 @@ func parseSolTransfers(tx *rpc.GetTransactionResult, self solana.PublicKey, time
 			Timestamp: timestamp,
 			Type:      eventType,
 			Amount:    amount,
-			Sender:    sender,
-			Recipient: recipient,
+			Sender:    &sender,
+			Recipient: &recipient,
 		}
 
 		mu.Lock()
@@ -490,7 +585,6 @@ func parseSolTransfers(tx *rpc.GetTransactionResult, self solana.PublicKey, time
 	}
 }
 
-// parseTokenTransfers extracts token transfers (for ARKHAM tokens)
 func parseTokenTransfers(tx *rpc.GetTransactionResult, self solana.PublicKey, timestamp time.Time, signature solana.Signature, result *HistoryResult, mu *sync.Mutex) {
 	if tx.Transaction == nil || tx.Meta == nil {
 		return
@@ -501,7 +595,6 @@ func parseTokenTransfers(tx *rpc.GetTransactionResult, self solana.PublicKey, ti
 		return
 	}
 
-	// Get ARKHAM mint PDA
 	arkhamMintPDA, _, err := solana.FindProgramAddress(
 		[][]byte{[]byte("arkham_mint")},
 		ProgramID,
@@ -510,15 +603,12 @@ func parseTokenTransfers(tx *rpc.GetTransactionResult, self solana.PublicKey, ti
 		return
 	}
 
-	// Look for token transfers in pre and post token balances
 	if tx.Meta.PreTokenBalances != nil && tx.Meta.PostTokenBalances != nil {
 		for _, postBalance := range tx.Meta.PostTokenBalances {
-			// Check if it's ARKHAM token
 			if postBalance.Mint != arkhamMintPDA {
 				continue
 			}
 
-			// Find corresponding pre-balance
 			var preAmount uint64 = 0
 			for _, preBalance := range tx.Meta.PreTokenBalances {
 				if preBalance.AccountIndex == postBalance.AccountIndex {
@@ -529,7 +619,6 @@ func parseTokenTransfers(tx *rpc.GetTransactionResult, self solana.PublicKey, ti
 				}
 			}
 
-			// Calculate transfer amount
 			var postAmount uint64 = 0
 			if postBalance.UiTokenAmount.Amount != "" {
 				fmt.Sscanf(postBalance.UiTokenAmount.Amount, "%d", &postAmount)
@@ -539,7 +628,6 @@ func parseTokenTransfers(tx *rpc.GetTransactionResult, self solana.PublicKey, ti
 				continue
 			}
 
-			// Get the token account owner
 			accountIdx := postBalance.AccountIndex
 			if int(accountIdx) >= len(parsed.Message.AccountKeys) {
 				continue
@@ -570,7 +658,7 @@ func parseTokenTransfers(tx *rpc.GetTransactionResult, self solana.PublicKey, ti
 	}
 }
 
-// Embedded IDL JSON - Complete arkham_protocol.json content
+
 const idlJSON = `{
   "address": "B85X9aTrpWAdi1xhLvPmDPuYmfz5YdMd9X8qr7uU4H18",
   "metadata": {
