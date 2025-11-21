@@ -70,6 +70,46 @@ func handleNodeStatus(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(p2pNode.Status())
 }
 
+func handleP2PGraph(w http.ResponseWriter, r *http.Request) {
+	host := p2pNode.GetHost()
+	if host == nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]node.PeerInfo{})
+		return
+	}
+
+	peers := host.Peerstore().Peers()
+	var peerInfos []node.PeerInfo
+
+	for _, p := range peers {
+		if p == host.ID() {
+			continue
+		}
+
+		addrs := host.Peerstore().Addrs(p)
+		addrStrings := make([]string, len(addrs))
+		for i, addr := range addrs {
+			addrStrings[i] = addr.String()
+		}
+
+		var latency int64
+		if lat, err := host.Peerstore().Get(p, "latency"); err == nil {
+			if l, ok := lat.(int64); ok {
+				latency = l
+			}
+		}
+
+		peerInfos = append(peerInfos, node.PeerInfo{
+			ID:      p.String(),
+			Addrs:   addrStrings,
+			Latency: latency,
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(peerInfos)
+}
+
 func handleGetHistory(w http.ResponseWriter, r *http.Request) {
 	profileName := r.URL.Query().Get("profile")
 	if profileName == "" {
@@ -548,7 +588,7 @@ func handleGetWardens(w http.ResponseWriter, r *http.Request) {
 
 		apiView := &WardenApiView{
 			ID:         warden.Authority.String(),
-			Nickname:   warden.Authority.String()[:6] + "..." + warden.Authority.String()[len(warden.Authority.String())-4:] ,
+			Nickname:   warden.Authority.String()[:6] + "..." + warden.Authority.String()[len(warden.Authority.String())-4:],
 			Location:   regionMap[warden.RegionCode],
 			Reputation: float64(warden.ReputationScore) / 2000.0, // 0-10000 to 0-5
 			PricePerGb: pricePerGbUsd,
@@ -661,6 +701,7 @@ func startGuiServer() {
 	http.HandleFunc("/api/node/start", handleNodeStart)
 	http.HandleFunc("/api/node/stop", handleNodeStop)
 	http.HandleFunc("/api/node/status", handleNodeStatus)
+	http.HandleFunc("/api/p2p-graph", handleP2PGraph)
 	http.HandleFunc("/api/profiles", handleGetProfiles)
 	http.HandleFunc("/api/addresses", handleGetAddresses)
 	http.HandleFunc("/api/create-profile", handleCreateProfile)
