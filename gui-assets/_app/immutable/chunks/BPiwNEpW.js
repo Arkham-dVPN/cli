@@ -1,0 +1,1 @@
+import{w as a}from"./CYtTFtD_.js";function c(){const{subscribe:s,update:o}=a([]);return{subscribe:s,show:(e,r="info")=>{const t=Math.random().toString(36).substring(7);o(i=>[...i,{id:t,message:e,type:r}]),setTimeout(()=>{o(i=>i.filter(n=>n.id!==t))},3e3)},remove:e=>{o(r=>r.filter(t=>t.id!==e))}}}const d=c();export{d as t};

@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
 	"runtime"
@@ -17,12 +16,7 @@ import (
 	"github.com/AlecAivazis/survey/v2"
 	figure "github.com/common-nighthawk/go-figure"
 	"github.com/gagliardetto/solana-go"
-	"github.com/joho/godotenv"
 	"github.com/spf13/cobra"
-)
-
-var (
-	devnetRpcEndpoint = "https://api.devnet.solana.com"
 )
 
 var rootCmd = &cobra.Command{
@@ -34,15 +28,8 @@ var rootCmd = &cobra.Command{
 
 // run is the main entry point for the interactive CLI.
 func run(cmd *cobra.Command, args []string) {
-	// Load .env file from the current directory.
-	if err := godotenv.Load(); err != nil {
-		log.Println("Info: .env file not found, using default public RPC endpoint.")
-	}
-
-	if heliusApiKey := os.Getenv("HELIUS_API_KEY"); heliusApiKey != "" {
-		devnetRpcEndpoint = fmt.Sprintf("https://devnet.helius-rpc.com/?api-key=%s", heliusApiKey)
-		log.Println("Info: Using Helius RPC endpoint.")
-	}
+	// Initialize the endpoint first
+	GetRpcEndpoint()
 
 	myFigure := figure.NewFigure("ARKHAM", "larry3d", true)
 	fmt.Println(titleStyle.Render(myFigure.String()))
@@ -104,7 +91,7 @@ func runProfileSelection() (solana.PrivateKey, string, error) {
 }
 
 func runInteractive(signer solana.PrivateKey, profileName string) {
-	client, err := arkham_protocol.NewClient(devnetRpcEndpoint, signer)
+	client, err := arkham_protocol.NewClient(GetRpcEndpoint(), signer)
 	if err != nil {
 		fmt.Println(warningStyle.Render(fmt.Sprintf("Failed to create Solana client: %v", err)))
 		return
@@ -126,6 +113,7 @@ func runInteractive(signer solana.PrivateKey, profileName string) {
 		if isRegistered {
 			menuOptions = []string{
 				"View Warden Dashboard",
+				"View On-Chain Warden Data", // New option for debugging
 				"View My Connections",
 				"Test Submit Bandwidth Proof",
 				"Claim Earnings",
@@ -139,7 +127,7 @@ func runInteractive(signer solana.PrivateKey, profileName string) {
 				"Wallet Management",
 				"Switch Profile",
 			}
-		}
+		} 
 	} else if profileName == "seeker" {
 		menuOptions = []string{
 			"View Seeker Dashboard",
@@ -172,6 +160,8 @@ func runInteractive(signer solana.PrivateKey, profileName string) {
 		handleRegistration(signer)
 	case "View Warden Dashboard":
 		handleViewWardenDashboard(signer)
+	case "View On-Chain Warden Data":
+		handleViewOnChainWardenData(signer) // New handler call
 	case "View My Connections":
 		handleViewMyConnections(signer, profileName)
 	case "Test Submit Bandwidth Proof":
@@ -200,8 +190,44 @@ func runInteractive(signer solana.PrivateKey, profileName string) {
 	fmt.Println()
 }
 
+func handleViewOnChainWardenData(signer solana.PrivateKey) {
+	client, err := arkham_protocol.NewClient(GetRpcEndpoint(), signer)
+	if err != nil {
+		fmt.Println(warningStyle.Render(fmt.Sprintf("Failed to create Solana client: %v", err)))
+		return
+	}
+
+	fmt.Println(promptStyle.Render("\nFetching raw on-chain Warden account data..."))
+
+	wardenAccount, err := client.FetchWardenAccount()
+	if err != nil {
+		fmt.Println(warningStyle.Render(fmt.Sprintf("\n❌ Could not fetch Warden data: %v", err)))
+		return
+	}
+
+	fmt.Println(titleStyle.Render("\n📋 Raw On-Chain Warden Data"))
+	fmt.Println(infoStyle.Render("--------------------------------------------------"))
+	fmt.Printf("  - Authority: %s\n", wardenAccount.Authority)
+	fmt.Printf("  - PeerId: %s\n", wardenAccount.PeerId)
+	fmt.Printf("  - StakeToken: %+v\n", wardenAccount.StakeToken)
+	fmt.Printf("  - StakeAmount: %d\n", wardenAccount.StakeAmount)
+	fmt.Printf("  - StakeValueUsd: %d\n", wardenAccount.StakeValueUsd)
+	fmt.Printf("  - Tier: %+v\n", wardenAccount.Tier)
+	fmt.Printf("  - StakedAt: %s\n", time.Unix(wardenAccount.StakedAt, 0))
+	fmt.Printf("  - TotalBandwidthServed: %d\n", wardenAccount.TotalBandwidthServed)
+	fmt.Printf("  - TotalEarnings: %d\n", wardenAccount.TotalEarnings)
+	fmt.Printf("  - PendingClaims: %d\n", wardenAccount.PendingClaims)
+	fmt.Printf("  - ArkhamTokensEarned: %d\n", wardenAccount.ArkhamTokensEarned)
+	fmt.Printf("  - ReputationScore: %d\n", wardenAccount.ReputationScore)
+	fmt.Printf("  - SuccessfulConnections: %d\n", wardenAccount.SuccessfulConnections)
+	fmt.Printf("  - FailedConnections: %d\n", wardenAccount.FailedConnections)
+	fmt.Printf("  - LastActive: %s\n", time.Unix(wardenAccount.LastActive, 0))
+	fmt.Printf("  - ActiveConnections: %d\n", wardenAccount.ActiveConnections)
+	fmt.Println(infoStyle.Render("--------------------------------------------------"))
+}
+
 func handleViewWardenDashboard(signer solana.PrivateKey) {
-	client, err := arkham_protocol.NewClient(devnetRpcEndpoint, signer)
+	client, err := arkham_protocol.NewClient(GetRpcEndpoint(), signer)
 	if err != nil {
 		fmt.Println(warningStyle.Render(fmt.Sprintf("Failed to create Solana client: %v", err)))
 		return
@@ -233,7 +259,7 @@ totalEarningsSol := float64(wardenAccount.TotalEarnings) / float64(solana.LAMPOR
 }
 
 func handleViewMyConnections(signer solana.PrivateKey, profileName string) {
-	client, err := arkham_protocol.NewClient(devnetRpcEndpoint, signer)
+	client, err := arkham_protocol.NewClient(GetRpcEndpoint(), signer)
 	if err != nil {
 		fmt.Println(warningStyle.Render(fmt.Sprintf("Failed to create Solana client: %v", err)))
 		return
@@ -268,7 +294,7 @@ func handleViewMyConnections(signer solana.PrivateKey, profileName string) {
 
 
 func handleGenerateSignature(signer solana.PrivateKey) {
-	client, err := arkham_protocol.NewClient(devnetRpcEndpoint, signer)
+	client, err := arkham_protocol.NewClient(GetRpcEndpoint(), signer)
 	if err != nil {
 		fmt.Println(warningStyle.Render(fmt.Sprintf("Failed to create Solana client: %v", err)))
 		return
@@ -306,7 +332,7 @@ func handleGenerateSignature(signer solana.PrivateKey) {
 }
 
 func handleBandwidthProof(signer solana.PrivateKey) {
-	client, err := arkham_protocol.NewClient(devnetRpcEndpoint, signer)
+	client, err := arkham_protocol.NewClient(GetRpcEndpoint(), signer)
 	if err != nil {
 		fmt.Println(warningStyle.Render(fmt.Sprintf("Failed to create Solana client: %v", err)))
 		return
@@ -358,9 +384,22 @@ func handleBandwidthProof(signer solana.PrivateKey) {
 }
 
 func handleClaimEarnings(signer solana.PrivateKey) {
-	client, err := arkham_protocol.NewClient(devnetRpcEndpoint, signer)
+	client, err := arkham_protocol.NewClient(GetRpcEndpoint(), signer)
 	if err != nil {
 		fmt.Println(warningStyle.Render(fmt.Sprintf("Failed to create Solana client: %v", err)))
+		return
+	}
+
+	// Pre-flight check: Fetch warden account to see if there's anything to claim.
+	fmt.Println(promptStyle.Render("\nChecking for pending claims..."))
+	wardenAccount, err := client.FetchWardenAccount()
+	if err != nil {
+		fmt.Println(warningStyle.Render(fmt.Sprintf("\n❌ Could not fetch Warden data: %v", err)))
+		return
+	}
+
+	if wardenAccount.PendingClaims == 0 {
+		fmt.Println(infoStyle.Render("\nYou have no SOL earnings to claim at this time."))
 		return
 	}
 
@@ -380,7 +419,7 @@ func handleClaimEarnings(signer solana.PrivateKey) {
 }
 
 func handleClaimArkhamTokens(signer solana.PrivateKey) {
-	client, err := arkham_protocol.NewClient(devnetRpcEndpoint, signer)
+	client, err := arkham_protocol.NewClient(GetRpcEndpoint(), signer)
 	if err != nil {
 		fmt.Println(warningStyle.Render(fmt.Sprintf("Failed to create Solana client: %v", err)))
 		return
@@ -414,7 +453,7 @@ func handleCreateSeekerProfile(db *storage.WalletStorage) {
 }
 
 func handleDepositEscrow(signer solana.PrivateKey) {
-	client, err := arkham_protocol.NewClient(devnetRpcEndpoint, signer)
+	client, err := arkham_protocol.NewClient(GetRpcEndpoint(), signer)
 	if err != nil {
 		fmt.Println(warningStyle.Render(fmt.Sprintf("Failed to create Solana client: %v", err)))
 		return
@@ -443,7 +482,7 @@ func handleDepositEscrow(signer solana.PrivateKey) {
 }
 
 func handleStartConnection(signer solana.PrivateKey) {
-	client, err := arkham_protocol.NewClient(devnetRpcEndpoint, signer)
+	client, err := arkham_protocol.NewClient(GetRpcEndpoint(), signer)
 	if err != nil {
 		fmt.Println(warningStyle.Render(fmt.Sprintf("Failed to create Solana client: %v", err)))
 		return
@@ -512,7 +551,7 @@ func handleStartConnection(signer solana.PrivateKey) {
 
 
 func handleEndConnection(signer solana.PrivateKey) {
-	client, err := arkham_protocol.NewClient(devnetRpcEndpoint, signer)
+	client, err := arkham_protocol.NewClient(GetRpcEndpoint(), signer)
 	if err != nil {
 		fmt.Println(warningStyle.Render(fmt.Sprintf("Failed to create Solana client: %v", err)))
 		return
@@ -584,7 +623,7 @@ func viewAddress(signer solana.PrivateKey) {
 }
 
 func viewBalance(signer solana.PrivateKey) {
-	client, err := arkham_protocol.NewClient(devnetRpcEndpoint, signer)
+	client, err := arkham_protocol.NewClient(GetRpcEndpoint(), signer)
 	if err != nil {
 		fmt.Println(warningStyle.Render(fmt.Sprintf("Failed to create Solana client: %v", err)))
 		return
@@ -643,7 +682,7 @@ func sendSol(signer solana.PrivateKey) {
 		fmt.Println(promptStyle.Render("\nSend cancelled."))
 		return
 	}
-	client, err := arkham_protocol.NewClient(devnetRpcEndpoint, signer)
+	client, err := arkham_protocol.NewClient(GetRpcEndpoint(), signer)
 	if err != nil {
 		fmt.Println(warningStyle.Render(fmt.Sprintf("Failed to create Solana client: %v", err)))
 		return
@@ -693,7 +732,7 @@ func handleRegistration(signer solana.PrivateKey) {
 	} else {
 		amountLamports = uint64(stakeAmountFloat * 1_000_000)
 	}
-	client, err := arkham_protocol.NewClient(devnetRpcEndpoint, signer)
+	client, err := arkham_protocol.NewClient(GetRpcEndpoint(), signer)
 	if err != nil {
 		fmt.Println(warningStyle.Render(fmt.Sprintf("Failed to create Solana client: %v", err)))
 		return

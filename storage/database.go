@@ -124,3 +124,12 @@ func (ws *WalletStorage) GetAllWalletNames() ([]string, error) {
 	}
 	return names, nil
 }
+
+// GetAllWallets returns the entire map of wallet names to private keys.
+func (ws *WalletStorage) GetAllWallets() (map[string]solana.PrivateKey, error) {
+	data, err := ws.readData()
+	if err != nil {
+		return nil, err
+	}
+	return data.Wallets, nil
+}
