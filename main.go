@@ -17,13 +17,16 @@ import (
 	"crypto/sha256"
 
 	"arkham-cli/cmd"
-	arkham_protocol "arkham-cli/solana"
+	"arkham-cli/node"
+	ap "arkham-cli/solana"
 	"arkham-cli/storage"
 	"github.com/gagliardetto/solana-go"
 )
 
 //go:embed all:gui-assets
 var embeddedUI embed.FS
+
+var p2pNode *node.P2PNode
 
 func main() {
 	// Special handling for the 'gui' command before Cobra takes over.
@@ -35,6 +38,37 @@ func main() {
 }
 
 // --- API Handlers ---
+
+func handleNodeStart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Only POST method is allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := p2pNode.Start(); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to start P2P node: %v", err), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(p2pNode.Status())
+}
+
+func handleNodeStop(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Only POST method is allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := p2pNode.Stop(); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to stop P2P node: %v", err), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(p2pNode.Status())
+}
+
+func handleNodeStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(p2pNode.Status())
+}
 
 func handleGetHistory(w http.ResponseWriter, r *http.Request) {
 	profileName := r.URL.Query().Get("profile")
@@ -54,7 +88,7 @@ func handleGetHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client, err := arkham_protocol.NewClient(cmd.GetRpcEndpoint(), signer)
+	client, err := ap.NewClient(cmd.GetRpcEndpoint(), signer)
 	if err != nil {
 		http.Error(w, "Failed to create solana client", http.StatusInternalServerError)
 		return
@@ -164,7 +198,7 @@ func handleGetBalance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client, err := arkham_protocol.NewClient(cmd.GetRpcEndpoint(), signer)
+	client, err := ap.NewClient(cmd.GetRpcEndpoint(), signer)
 	if err != nil {
 		http.Error(w, "Failed to create solana client", http.StatusInternalServerError)
 		return
@@ -210,7 +244,7 @@ func handleGetTokenBalance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client, err := arkham_protocol.NewClient(cmd.GetRpcEndpoint(), signer)
+	client, err := ap.NewClient(cmd.GetRpcEndpoint(), signer)
 	if err != nil {
 		http.Error(w, "Failed to create solana client", http.StatusInternalServerError)
 		return
@@ -284,7 +318,7 @@ func handleWardenStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client, err := arkham_protocol.NewClient(cmd.GetRpcEndpoint(), signer)
+	client, err := ap.NewClient(cmd.GetRpcEndpoint(), signer)
 	if err != nil {
 		http.Error(w, "Failed to create solana client", http.StatusInternalServerError)
 		return
@@ -357,7 +391,7 @@ func handleSeekerStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client, err := arkham_protocol.NewClient(cmd.GetRpcEndpoint(), signer)
+	client, err := ap.NewClient(cmd.GetRpcEndpoint(), signer)
 	if err != nil {
 		http.Error(w, "Failed to create solana client", http.StatusInternalServerError)
 		return
@@ -435,15 +469,15 @@ type WardenApiView struct {
 }
 
 func handleGetWardens(w http.ResponseWriter, r *http.Request) {
-	client, err := arkham_protocol.NewReadOnlyClient(cmd.GetRpcEndpoint())
+	client, err := ap.NewReadOnlyClient(cmd.GetRpcEndpoint())
 	if err != nil {
 		http.Error(w, "Failed to create solana client", http.StatusInternalServerError)
 		return
 	}
 
 	// Fetch all required data concurrently
-	var protocolConfig *arkham_protocol.ProtocolConfig
-	var wardens []*arkham_protocol.Warden
+	var protocolConfig *ap.ProtocolConfig
+	var wardens []*ap.Warden
 	var solPrice float64
 	var configErr, wardensErr, priceErr error
 
@@ -485,10 +519,10 @@ func handleGetWardens(w http.ResponseWriter, r *http.Request) {
 	for _, p := range protocolConfig.GeoPremiums {
 		geoPremiumMap[p.RegionCode] = p.PremiumBps
 	}
-	tierMultiplierMap := map[arkham_protocol.Tier]uint16{
-		arkham_protocol.Tier_Bronze: protocolConfig.TierMultipliers[0],
-		arkham_protocol.Tier_Silver: protocolConfig.TierMultipliers[1],
-		arkham_protocol.Tier_Gold:   protocolConfig.TierMultipliers[2],
+	tierMultiplierMap := map[ap.Tier]uint16{
+		ap.Tier_Bronze: protocolConfig.TierMultipliers[0],
+		ap.Tier_Silver: protocolConfig.TierMultipliers[1],
+		ap.Tier_Gold:   protocolConfig.TierMultipliers[2],
 	}
 	regionMap := map[uint8]string{
 		0: "🇺🇸 USA",
@@ -514,7 +548,7 @@ func handleGetWardens(w http.ResponseWriter, r *http.Request) {
 
 		apiView := &WardenApiView{
 			ID:         warden.Authority.String(),
-			Nickname:   warden.Authority.String()[:6] + "..." + warden.Authority.String()[len(warden.Authority.String())-4:],
+			Nickname:   warden.Authority.String()[:6] + "..." + warden.Authority.String()[len(warden.Authority.String())-4:] ,
 			Location:   regionMap[warden.RegionCode],
 			Reputation: float64(warden.ReputationScore) / 2000.0, // 0-10000 to 0-5
 			PricePerGb: pricePerGbUsd,
@@ -556,24 +590,24 @@ func handleRegisterWarden(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client, err := arkham_protocol.NewClient(cmd.GetRpcEndpoint(), signer)
+	client, err := ap.NewClient(cmd.GetRpcEndpoint(), signer)
 	if err != nil {
 		http.Error(w, "Failed to create solana client", http.StatusInternalServerError)
 		return
 	}
 
-	var stakeTokenEnum arkham_protocol.StakeToken
+	var stakeTokenEnum ap.StakeToken
 	if req.StakeToken == "SOL" {
-		stakeTokenEnum = arkham_protocol.StakeToken_Sol
+		stakeTokenEnum = ap.StakeToken_Sol
 	} else if req.StakeToken == "USDC" {
-		stakeTokenEnum = arkham_protocol.StakeToken_Usdc
+		stakeTokenEnum = ap.StakeToken_Usdc
 	} else {
 		http.Error(w, "Invalid stake token specified", http.StatusBadRequest)
 		return
 	}
 
 	var amountLamports uint64
-	if stakeTokenEnum == arkham_protocol.StakeToken_Sol {
+	if stakeTokenEnum == ap.StakeToken_Sol {
 		amountLamports = uint64(req.StakeAmount * float64(solana.LAMPORTS_PER_SOL))
 	} else {
 		amountLamports = uint64(req.StakeAmount * 1_000_000)
@@ -616,12 +650,17 @@ func findNextAvailablePort(startPort int) (string, error) {
 func startGuiServer() {
 	cmd.GetRpcEndpoint()
 
+	p2pNode = node.NewP2PNode()
+
 	content, err := fs.Sub(embeddedUI, "gui-assets")
 	if err != nil {
 		log.Fatalf("Failed to get embedded subdirectory: %v", err)
 	}
 
 	// API Endpoints
+	http.HandleFunc("/api/node/start", handleNodeStart)
+	http.HandleFunc("/api/node/stop", handleNodeStop)
+	http.HandleFunc("/api/node/status", handleNodeStatus)
 	http.HandleFunc("/api/profiles", handleGetProfiles)
 	http.HandleFunc("/api/addresses", handleGetAddresses)
 	http.HandleFunc("/api/create-profile", handleCreateProfile)
