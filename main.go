@@ -502,6 +502,7 @@ func getSolPrice() (float64, error) {
 // WardenApiView is the simplified warden model for the frontend.
 type WardenApiView struct {
 	ID         string  `json:"id"`
+	Authority  string  `json:"authority"`
 	Nickname   string  `json:"nickname"`
 	Location   string  `json:"location"`
 	Reputation float64 `json:"reputation"`
@@ -587,7 +588,8 @@ func handleGetWardens(w http.ResponseWriter, r *http.Request) {
 		pricePerGbUsd := pricePerGbSol * solPrice
 
 		apiView := &WardenApiView{
-			ID:         warden.Authority.String(),
+			ID:         warden.PeerId,
+			Authority:  warden.Authority.String(),
 			Nickname:   warden.Authority.String()[:6] + "..." + warden.Authority.String()[len(warden.Authority.String())-4:],
 			Location:   regionMap[warden.RegionCode],
 			Reputation: float64(warden.ReputationScore) / 2000.0, // 0-10000 to 0-5
