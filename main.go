@@ -7,10 +7,12 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"crypto/sha256"
 
@@ -351,6 +353,19 @@ func handleRegisterWarden(w http.ResponseWriter, r *http.Request) {
 
 // --- GUI Server ---
 
+func getAvailablePort() (string, error) {
+	// Listen on TCP port 0, which tells the OS to pick a random ephemeral port.
+	listener, err := net.Listen("tcp", ":0")
+	if err != nil {
+		return "", fmt.Errorf("failed to find an available port: %w", err)
+	}
+	defer listener.Close()
+
+	// Get the port number from the listener's address.
+	port := listener.Addr().(*net.TCPAddr).Port
+	return strconv.Itoa(port), nil
+}
+
 func startGuiServer() {
 	cmd.GetRpcEndpoint()
 
@@ -395,7 +410,11 @@ func startGuiServer() {
 		http.ServeContent(w, r, r.URL.Path, stat.ModTime(), file.(io.ReadSeeker))
 	})
 
-	port := "8088"
+	port, err := getAvailablePort()
+	if err != nil {
+		log.Fatalf("Failed to start GUI server: %v", err)
+	}
+
 	url := fmt.Sprintf("http://localhost:%s", port)
 	fmt.Printf("🚀 Launching Arkham GUI at %s\n", url)
 
